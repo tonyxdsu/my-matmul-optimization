@@ -9,7 +9,7 @@ and OpenBLAS as a reference.
 | How much faster is cache blocking than the naive loop, and why? | `BM_Naive`, `BM_Blocked` over n = 100 to 4000 | `throughput_vs_size`, `cache_misses` |
 | How well does the threadpool version scale? Do 16 workers help on 8 cores? | `BM_BlockedParallel`, 1 to 16 workers at n = 2000 | `thread_scaling` |
 | Which tile size is best, and why? | `BM_Blocked` and `BM_BlockedParallel` (8 workers), tile edge 8 to 512 | `tile_sweep` |
-| How far is this from a tuned library? | `BM_OpenBLAS`, same sizes and worker counts | `headline` |
+| How far is this from a tuned library? | `BM_OpenBLAS`, same sizes and worker counts; `BM_AOCL` in its own suite (`build/bench_aocl`) | `headline` |
 
 ## v1: loop order i-k-j
 
@@ -207,6 +207,26 @@ into `~/.local` and leaves system packages alone (a virtual environment also wor
 `apt install python3-matplotlib` if NumPy 2 is installed with pip: Ubuntu's matplotlib is built
 against NumPy 1 and will not import next to it.
 
+### AOCL-BLAS reference (optional)
+
+OpenBLAS 0.3.26 has no kernels for Zen 5: on this CPU it picks Intel's Cooper Lake AVX-512 code.
+AMD's AOCL-BLAS, its fork of BLIS, has kernels written for Zen 5 and is the stronger reference.
+Build it from source into your home directory, no sudo:
+
+```sh
+git clone --depth 1 --branch 5.3.2 https://github.com/amd/blis ~/opt/src/aocl-blis-5.3.2
+cd ~/opt/src/aocl-blis-5.3.2
+./configure --prefix=$HOME/opt/aocl-blis-5.3.2 --enable-cblas --enable-threading=openmp zen5
+make -j16 && make install                     # about 20 seconds
+ln -sfn aocl-blis-5.3.2 ~/opt/aocl-blis       # the Makefile's default AOCL_DIR
+```
+
+AOCL-BLAS exports the same BLAS functions as OpenBLAS, so one program cannot link both.
+`bench/aocl_bench.cpp` is therefore its own suite, `build/bench_aocl`, with `BM_AOCL` at the same
+sizes and worker counts as `BM_OpenBLAS`. Each results file records the AOCL-BLAS version and the
+CPU configuration it picked (`config=zen5`). For a fair comparison, run the suites back to back
+in one session rather than comparing files from different days.
+
 ## Running
 
 | Command | What it does | Time |
@@ -216,6 +236,8 @@ against NumPy 1 and will not import next to it.
 | `make bench-run` | Five interleaved repetitions, saved to `bench/results/<label>.json` | ~20 min |
 | `make bench-plot` | Charts and `summary.md` from that file into `bench/plots/`, and the results section of this README. `BASE=<label>` also draws an earlier run for comparison. | seconds |
 | `make bench-compare BASE=<label>` | Compare two results files with a significance test | seconds |
+| `make bench-aocl` | Build the AOCL-BLAS suite, `build/bench_aocl` (needs AOCL-BLAS, see Setup) | |
+| `make bench-aocl-run` | Five interleaved repetitions of `BM_AOCL`, saved to `bench/results/<label>-aocl.json` | ~2 min |
 
 `<label>` defaults to `git describe --always --dirty`, so a run is named after the commit it
 measured (`22af068`, or `22af068-dirty` with uncommitted changes). Name a run yourself with
@@ -373,7 +395,8 @@ lines. Plotting with `python3 bench/plot.py` directly leaves the README alone un
 |---|---|
 | `matmul_bench.cpp` | Naive, blocked and parallel benchmarks, and `main()` |
 | `openblas_bench.cpp` | OpenBLAS reference, built only if OpenBLAS is installed |
-| `bench_common.hpp/.cpp` | Sizes, tile and worker lists, the Freivalds check, metric reporting |
+| `aocl_bench.cpp` | AOCL-BLAS reference and its own `main()`: the separate `build/bench_aocl` suite |
+| `bench_common.hpp/.cpp` | Sizes, tile and worker lists, the Freivalds check, metric reporting, results-file context |
 | `perf_counters.hpp/.cpp` | Hardware counter wrapper around `perf_event_open` |
 | `plot.py` | Charts and `summary.md` from a results file |
 | `results/` | One JSON file per run |

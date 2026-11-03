@@ -41,7 +41,15 @@ OPENBLAS := $(shell pkg-config --exists openblas 2>/dev/null && echo 1 || echo 0
 endif
 BENCH_SRCS = $(wildcard $(BENCH_DIR)/*.cpp)
 BENCH_CPPFLAGS := $(shell pkg-config --cflags benchmark 2>/dev/null)
-BENCH_LIBS := $(shell pkg-config --libs benchmark 2>/dev/null || echo -lbenchmark) -pthread
+BENCHMARK_LIBS := $(shell pkg-config --libs benchmark 2>/dev/null || echo -lbenchmark) -pthread
+BENCH_LIBS := $(BENCHMARK_LIBS)
+# AMD's AOCL-BLAS, a second reference with kernels for Zen 5, exports the same BLAS functions as
+# OpenBLAS, so bench/aocl_bench.cpp is its own suite (build/bench_aocl), never part of build/bench.
+# AOCL_DIR is where AOCL-BLAS is installed; see "AOCL-BLAS reference" in README.md.
+AOCL_DIR ?= $(HOME)/opt/aocl-blis
+AOCL_SRC = $(BENCH_DIR)/aocl_bench.cpp
+AOCL_TARGET = $(BUILD_DIR)/bench_aocl
+BENCH_SRCS := $(filter-out $(AOCL_SRC),$(BENCH_SRCS))
 ifeq ($(OPENBLAS),1)
 BENCH_CPPFLAGS += $(shell pkg-config --cflags openblas)
 BENCH_LIBS += $(shell pkg-config --libs openblas)
@@ -74,9 +82,16 @@ BENCH_FLAGS = --benchmark_counters_tabular=true --benchmark_context=git=$(LABEL)
 COMPARE_PY ?= /usr/share/benchmark/compare.py
 
 # Stop early, with the install command, if Google Benchmark is missing.
-ifneq ($(filter bench bench-run bench-quick,$(MAKECMDGOALS)),)
+ifneq ($(filter bench bench-run bench-quick bench-aocl bench-aocl-run,$(MAKECMDGOALS)),)
 ifneq ($(shell pkg-config --exists benchmark 2>/dev/null && echo yes),yes)
 $(error Google Benchmark not found. Install it with: sudo apt install libbenchmark-dev libbenchmark-tools)
+endif
+endif
+
+# Stop early, saying where to get it, if AOCL-BLAS is missing.
+ifneq ($(filter bench-aocl bench-aocl-run,$(MAKECMDGOALS)),)
+ifeq ($(wildcard $(AOCL_DIR)/lib/libblis-mt.so),)
+$(error AOCL-BLAS not found in $(AOCL_DIR). See "AOCL-BLAS reference" in README.md, or set AOCL_DIR)
 endif
 endif
 
@@ -113,6 +128,16 @@ $(BENCH_TARGET): $(LIB_OBJS) $(BENCH_OBJS)
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(LIB_OBJS) $(BENCH_OBJS) $(BENCH_LDFLAGS) $(BENCH_LIBS) -o $(BENCH_TARGET)
 
+# Compile the AOCL-BLAS suite against AOCL-BLAS's headers (its own cblas.h), not OpenBLAS's.
+$(BUILD_DIR)/aocl_bench.bench.o: $(AOCL_SRC)
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -isystem $(AOCL_DIR)/include/blis -DBENCH_CXXFLAGS='"$(CXXFLAGS)"' -c $< -o $@
+
+# Link the AOCL-BLAS suite: the shared benchmark helpers plus AOCL-BLAS, without OpenBLAS.
+$(AOCL_TARGET): $(LIB_OBJS) $(BUILD_DIR)/bench_common.bench.o $(BUILD_DIR)/perf_counters.bench.o $(BUILD_DIR)/aocl_bench.bench.o
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $^ $(BENCH_LDFLAGS) -L$(AOCL_DIR)/lib -Wl,-rpath,$(AOCL_DIR)/lib -lblis-mt -fopenmp $(BENCHMARK_LIBS) -o $@
+
 # Build the chain demo twice from one source, with and without SIMD. Each binary prints
 # EXP_CXXFLAGS, so its output says how it was built.
 $(BUILD_DIR)/chain_demo: $(CHAIN_DEMO_DEPS)
@@ -144,6 +169,16 @@ bench-run: $(BENCH_TARGET)
 bench-quick: $(BENCH_TARGET)
 	./$(BENCH_TARGET) $(BENCH_FLAGS) '--benchmark_filter=-n:(3000|4000)/' $(ARGS)
 
+# Build the AOCL-BLAS reference suite (needs AOCL-BLAS in AOCL_DIR)
+bench-aocl: $(AOCL_TARGET)
+
+# AOCL-BLAS run, interleaved like bench-run, saved to bench/results/<LABEL>-aocl.json
+bench-aocl-run: $(AOCL_TARGET)
+	@mkdir -p $(RESULTS_DIR)
+	./$(AOCL_TARGET) $(BENCH_FLAGS) --benchmark_repetitions=$(BENCH_REPS) \
+		--benchmark_enable_random_interleaving=true --benchmark_display_aggregates_only=true \
+		--benchmark_out=$(RESULTS_DIR)/$(LABEL)-aocl.json --benchmark_out_format=json $(ARGS)
+
 # Charts and summary.md from a results file, with the summary also copied into README.md
 # between its results markers (needs: pip install matplotlib). BASE=<label> also draws that
 # earlier run for comparison, e.g. make bench-plot LABEL=v1 BASE=v0
@@ -172,4 +207,4 @@ run: all
 
 -include $(wildcard $(BUILD_DIR)/*.d)
 
-.PHONY: all test bench bench-run bench-quick bench-plot bench-compare chain-demo clean run
+.PHONY: all test bench bench-run bench-quick bench-aocl bench-aocl-run bench-plot bench-compare chain-demo clean run

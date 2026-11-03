@@ -14,13 +14,7 @@
 #include <benchmark/benchmark.h>
 
 #include <chrono>
-#include <fstream>
-#include <string>
 #include <thread>
-
-#ifndef BENCH_CXXFLAGS
-#define BENCH_CXXFLAGS "unknown"
-#endif
 
 namespace {
 
@@ -121,33 +115,12 @@ BENCHMARK(BM_BlockedParallel)
     ->MeasureProcessCPUTime()
     ->Unit(benchmark::kMillisecond);
 
-// The CPU model from /proc/cpuinfo. Google Benchmark records only core count and caches.
-std::string cpuModel() {
-    std::ifstream cpuinfo("/proc/cpuinfo");
-    std::string line;
-    while (std::getline(cpuinfo, line)) {
-        if (line.rfind("model name", 0) != 0) continue;
-        const auto start = line.find_first_not_of(" \t", line.find(':') + 1);
-        if (start != std::string::npos) return line.substr(start);
-    }
-    return "unknown";
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
     benchmark::Initialize(&argc, argv);
     if (benchmark::ReportUnrecognizedArguments(argc, argv)) return 1;
-
-#ifdef __clang__
-    benchmark::AddCustomContext("compiler", "clang " __VERSION__);
-#else
-    benchmark::AddCustomContext("compiler", "gcc " __VERSION__);
-#endif
-    benchmark::AddCustomContext("cpu", cpuModel());
-    benchmark::AddCustomContext("cxxflags", BENCH_CXXFLAGS);
-    benchmark::AddCustomContext("block_size", std::to_string(bench::kBlockSize));
-    benchmark::AddCustomContext("perf_counters", PerfCounters().describe());
+    bench::addContext();
 
     // OpenBLAS, if linked in, starts its worker threads when it loads, and they busy-wait for
     // about 60 ms. Let them go idle so they cannot slow down the first benchmark.
