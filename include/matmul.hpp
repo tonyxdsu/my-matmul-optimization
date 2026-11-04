@@ -4,7 +4,66 @@
 #include "threadpool.hpp"
 
 #include <cstddef>
+#include <new>
 #include <vector>
+
+/**
+ * Allocator that returns memory aligned to Alignment bytes. Used so a matrix's buffer
+ * starts on a cache-line boundary, letting full-width vector loads stay within one line.
+ *
+ * @tparam T Element type.
+ * @tparam Alignment Required alignment in bytes; must be a power of two.
+ */
+template <typename T, std::size_t Alignment>
+struct AlignedAllocator {
+    // Aligned operator new has undefined behavior for an alignment that is not a power of two.
+    static_assert(Alignment != 0 && (Alignment & (Alignment - 1)) == 0,
+                  "Alignment must be a power of two");
+    static_assert(Alignment >= alignof(T), "Alignment must be at least alignof(T)");
+
+    using value_type = T;
+
+    // Needed because Alignment is a non-type parameter, so std::allocator_traits
+    // cannot work out how to rebind this allocator to another type on its own.
+    template <typename U>
+    struct rebind {
+        using other = AlignedAllocator<U, Alignment>;
+    };
+
+    AlignedAllocator() noexcept = default;
+
+    template <typename U>
+    AlignedAllocator(const AlignedAllocator<U, Alignment>&) noexcept {}
+
+    T* allocate(std::size_t n) {
+        return static_cast<T*>(::operator new(n * sizeof(T), std::align_val_t{Alignment}));
+    }
+
+    void deallocate(T* p, std::size_t) noexcept {
+        ::operator delete(p, std::align_val_t{Alignment});
+    }
+};
+
+/**
+ * Allocator equality: true means memory allocated by one allocator can be freed by the other.
+ * Containers check this when they exchange buffers (move assignment, swap). Equal allocators let
+ * the container take the other buffer's pointer in O(1); unequal ones force it to allocate its
+ * own buffer and move the elements one by one.
+ *
+ * Always true here because AlignedAllocator has no state: every instance uses the same global
+ * aligned operator new and delete. T and U may differ because a container can rebind its
+ * allocator to another element type, and a rebound copy must compare equal to the original.
+ * The alignment A must match, since allocators with different alignments are not interchangeable.
+ */
+template <typename T, typename U, std::size_t A>
+bool operator==(const AlignedAllocator<T, A>&, const AlignedAllocator<U, A>&) noexcept { return true; }
+
+/**
+ * Required alongside operator== by the C++17 allocator requirements.
+ * TODO: switch to C++20, which generates this from operator==, then delete it.
+ */
+template <typename T, typename U, std::size_t A>
+bool operator!=(const AlignedAllocator<T, A>&, const AlignedAllocator<U, A>&) noexcept { return false; }
 
 /**
  * Dense, row-major matrix. Element (r, c) lives at data[r * cols + c].
@@ -12,8 +71,10 @@
 struct Matrix {
     /**
      * Element storage, row-major. Size is rows * cols.
+     * The buffer starts on a 64-byte (cache-line) boundary. Every row starts on one only when
+     * cols is a multiple of 8 (64 bytes / sizeof(double)); otherwise some rows start mid-line.
      */
-    std::vector<double> data;
+    std::vector<double, AlignedAllocator<double, 64>> data;
 
     /**
      * Number of rows.

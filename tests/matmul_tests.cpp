@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <stdexcept>
 #include <vector>
 
@@ -34,7 +35,7 @@ Matrix referenceMultiply(const Matrix& A, const Matrix& B) {
 // Builds a rows x cols matrix from a row-major initializer list.
 Matrix fromList(std::size_t rows, std::size_t cols, std::vector<double> values) {
     Matrix m(rows, cols);
-    m.data = std::move(values);
+    m.data.assign(values.begin(), values.end());
     return m;
 }
 
@@ -89,7 +90,17 @@ TEST(MatrixTest, AtIsRowMajor) {
     Matrix m(2, 3);
     m.at(0, 0) = 1; m.at(0, 1) = 2; m.at(0, 2) = 3;
     m.at(1, 0) = 4; m.at(1, 1) = 5; m.at(1, 2) = 6;
-    EXPECT_EQ(m.data, (std::vector<double>{1, 2, 3, 4, 5, 6}));
+    EXPECT_EQ(m.data, (decltype(m.data){1, 2, 3, 4, 5, 6}));
+}
+
+// The buffer must start on a 64-byte cache-line boundary so full-width vector loads of an
+// aligned row never straddle two lines. Covers sizes that take both of glibc's allocation
+// paths: small blocks from the heap and large blocks (2000 x 2000 = 32 MB) from mmap.
+TEST(MatrixTest, DataIsCacheLineAligned) {
+    for (std::size_t n : {1u, 7u, 100u, 2000u}) {
+        Matrix m(n, n);
+        EXPECT_EQ(reinterpret_cast<std::uintptr_t>(m.data.data()) % 64, 0u) << "n = " << n;
+    }
 }
 
 TEST(MatrixTest, ConstAtReadsSameElement) {
@@ -322,7 +333,7 @@ TEST(MultiplyNaiveTest, MatchesReferenceOnRandomInput) {
 TEST(MultiplyNaiveTest, DoesNotModifyInputs) {
     Matrix A = randomMatrix(4, 4, 5);
     Matrix B = randomMatrix(4, 4, 6);
-    std::vector<double> aCopy = A.data, bCopy = B.data;
+    auto aCopy = A.data, bCopy = B.data;
     multiplyNaive(A, B);
     EXPECT_EQ(A.data, aCopy);
     EXPECT_EQ(B.data, bCopy);
@@ -454,7 +465,7 @@ TEST(MultiplyBlockedTest, EmptyResult) {
 TEST(MultiplyBlockedTest, DoesNotModifyInputs) {
     Matrix A = randomMatrix(6, 7, 19);
     Matrix B = randomMatrix(7, 5, 20);
-    std::vector<double> aCopy = A.data, bCopy = B.data;
+    auto aCopy = A.data, bCopy = B.data;
     multiplyBlocked(A, B, 3);
     EXPECT_EQ(A.data, aCopy);
     EXPECT_EQ(B.data, bCopy);
@@ -708,7 +719,7 @@ TEST(MultiplyBlockedParallelTest, DoesNotModifyInputs) {
     Threadpool pool(4);
     Matrix A = randomMatrix(9, 9, 92);
     Matrix B = randomMatrix(9, 9, 93);
-    std::vector<double> aCopy = A.data, bCopy = B.data;
+    auto aCopy = A.data, bCopy = B.data;
     multiplyBlockedParallel(A, B, 4, pool);
     EXPECT_EQ(A.data, aCopy);
     EXPECT_EQ(B.data, bCopy);
