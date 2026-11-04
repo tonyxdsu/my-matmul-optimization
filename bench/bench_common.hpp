@@ -76,6 +76,13 @@ bool contains(const Range& range, const T& value) {
 bool productLooksCorrect(const Matrix& A, const Matrix& B, const Matrix& C);
 
 /**
+ * Records the compiler, the CPU model, the build flags, the default tile and the open hardware
+ * counters in the results file's context, so every file says what it measured. Call after
+ * benchmark::Initialize.
+ */
+void addContext();
+
+/**
  * Ends a matmul benchmark. Checks the last result with productLooksCorrect and marks the
  * benchmark as failed if it is wrong. Otherwise reports FLOP/s and, if counters is given,
  * IPC, the average clock speed of the busy cores, and cache misses per multiply-add (FMA).

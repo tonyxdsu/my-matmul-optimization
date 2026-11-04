@@ -4,7 +4,45 @@
 #include "threadpool.hpp"
 
 #include <cstddef>
+#include <new>
 #include <vector>
+
+/**
+ * Allocator that returns memory aligned to Alignment bytes. Used so a matrix's buffer
+ * starts on a cache-line boundary, letting full-width vector loads stay within one line.
+ *
+ * @tparam T Element type.
+ * @tparam Alignment Required alignment in bytes; must be a power of two.
+ */
+template <typename T, std::size_t Alignment>
+struct AlignedAllocator {
+    // Aligned operator new has undefined behavior for an alignment that is not a power of two.
+    static_assert(Alignment != 0 && (Alignment & (Alignment - 1)) == 0,
+                  "Alignment must be a power of two");
+    static_assert(Alignment >= alignof(T), "Alignment must be at least alignof(T)");
+
+    using value_type = T;
+
+    // Needed because Alignment is a non-type parameter, so std::allocator_traits
+    // cannot work out how to rebind this allocator to another type on its own.
+    template <typename U>
+    struct rebind {
+        using other = AlignedAllocator<U, Alignment>;
+    };
+
+    AlignedAllocator() noexcept = default;
+
+    template <typename U>
+    AlignedAllocator(const AlignedAllocator<U, Alignment>&) noexcept {}
+
+    T* allocate(std::size_t n) {
+        return static_cast<T*>(::operator new(n * sizeof(T), std::align_val_t{Alignment}));
+    }
+
+    void deallocate(T* p, std::size_t) noexcept {
+        ::operator delete(p, std::align_val_t{Alignment});
+    }
+};
 
 /**
  * Dense, row-major matrix. Element (r, c) lives at data[r * cols + c].
@@ -12,8 +50,10 @@
 struct Matrix {
     /**
      * Element storage, row-major. Size is rows * cols.
+     * The buffer starts on a 64-byte (cache-line) boundary. Every row starts on one only when
+     * cols is a multiple of 8 (64 bytes / sizeof(double)); otherwise some rows start mid-line.
      */
-    std::vector<double> data;
+    std::vector<double, AlignedAllocator<double, 64>> data;
 
     /**
      * Number of rows.

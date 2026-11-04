@@ -1,12 +1,46 @@
 #include "bench_common.hpp"
 
 #include <cmath>
+#include <fstream>
 #include <limits>
 #include <random>
+#include <string>
 #include <thread>
 #include <utility>
 
+#ifndef BENCH_CXXFLAGS
+#define BENCH_CXXFLAGS "unknown"
+#endif
+
+namespace {
+
+// The CPU model from /proc/cpuinfo. Google Benchmark records only core count and caches.
+std::string cpuModel() {
+    std::ifstream cpuinfo("/proc/cpuinfo");
+    std::string line;
+    while (std::getline(cpuinfo, line)) {
+        if (line.rfind("model name", 0) != 0) continue;
+        const auto start = line.find_first_not_of(" \t", line.find(':') + 1);
+        if (start != std::string::npos) return line.substr(start);
+    }
+    return "unknown";
+}
+
+}  // namespace
+
 namespace bench {
+
+void addContext() {
+#ifdef __clang__
+    benchmark::AddCustomContext("compiler", "clang " __VERSION__);
+#else
+    benchmark::AddCustomContext("compiler", "gcc " __VERSION__);
+#endif
+    benchmark::AddCustomContext("cpu", cpuModel());
+    benchmark::AddCustomContext("cxxflags", BENCH_CXXFLAGS);
+    benchmark::AddCustomContext("block_size", std::to_string(kBlockSize));
+    benchmark::AddCustomContext("perf_counters", PerfCounters().describe());
+}
 
 std::vector<std::int64_t> workerCounts() {
     const std::int64_t hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
