@@ -7,7 +7,7 @@ CXX = g++
 # depends on the size of everything linked before it: the blocked kernel's inner loop ran 25-45%
 # slower when it straddled two 64-byte lines, and unrelated code changes could flip that.
 OPTFLAGS = -O3 -march=native -g -falign-loops=64
-CXXFLAGS = -std=c++17 -Wall -Wextra -Iinclude -pthread $(OPTFLAGS)
+CXXFLAGS = -std=c++20 -Wall -Wextra -Iinclude -pthread $(OPTFLAGS)
 # -MMD -MP write a .d file per object listing the headers it includes, so editing a header
 # rebuilds everything that uses it. Without this, a benchmark can silently run stale code.
 DEPFLAGS = -MMD -MP

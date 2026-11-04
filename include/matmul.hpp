@@ -45,27 +45,6 @@ struct AlignedAllocator {
 };
 
 /**
- * Allocator equality: true means memory allocated by one allocator can be freed by the other.
- * Containers check this when they exchange buffers (move assignment, swap). Equal allocators let
- * the container take the other buffer's pointer in O(1); unequal ones force it to allocate its
- * own buffer and move the elements one by one.
- *
- * Always true here because AlignedAllocator has no state: every instance uses the same global
- * aligned operator new and delete. T and U may differ because a container can rebind its
- * allocator to another element type, and a rebound copy must compare equal to the original.
- * The alignment A must match, since allocators with different alignments are not interchangeable.
- */
-template <typename T, typename U, std::size_t A>
-bool operator==(const AlignedAllocator<T, A>&, const AlignedAllocator<U, A>&) noexcept { return true; }
-
-/**
- * Required alongside operator== by the C++17 allocator requirements.
- * TODO: switch to C++20, which generates this from operator==, then delete it.
- */
-template <typename T, typename U, std::size_t A>
-bool operator!=(const AlignedAllocator<T, A>&, const AlignedAllocator<U, A>&) noexcept { return false; }
-
-/**
  * Dense, row-major matrix. Element (r, c) lives at data[r * cols + c].
  */
 struct Matrix {
