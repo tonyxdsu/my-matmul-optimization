@@ -1,8 +1,9 @@
-# Benchmarks
+# My matmul optimization
 
-Measures the matrix multiply implementations in `include/matmul.hpp` with
-[Google Benchmark](https://github.com/google/benchmark), with hardware performance counters
-and OpenBLAS as a reference.
+A learning project that optimizes matrix multiplication step by step, with a hand-written thread
+pool. The implementations are measured with
+[Google Benchmark](https://github.com/google/benchmark), with hardware performance counters and
+OpenBLAS as a reference.
 
 | Question | Benchmarks | Chart |
 |---|---|---|
