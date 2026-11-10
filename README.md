@@ -15,7 +15,7 @@ OpenBLAS as a reference.
 **Versions**
 
 - [v0: cache blocking](#v0-cache-blocking)
-- [v1: loop order i-k-j](#v1-loop-order-i-k-j)
+- [v1: loop interchange for auto-vectorization](#v1-loop-interchange-i-k-j-for-auto-vectorization)
 - [v2: cache-line-aligned storage](#v2-cache-line-aligned-storage)
 - v3: promise no aliasing, hoist loop invariants (planned)
 - v4: register blocking (planned)
@@ -36,10 +36,11 @@ On one thread at tile 48 (`bench/results/v0.json`), blocked stays at about 7 GFL
 to 4000, while naive falls from 6.22 to 1.12. At n = 2000, L1 misses per multiply-add drop from
 1.09 to 0.014 and blocked is 1.81x faster. The first GIF under v1 shows the order inside one tile.
 
-## v1: loop order i-k-j
+## v1: loop interchange (i-k-j) for auto-vectorization
 
-v1 changes one thing in `multiplyBlock`: the order of the loops inside a tile. The innermost loop
-now walks along a row of C instead of summing down a column of B. For each k block of a tile:
+v1 changes one thing in `multiplyBlock`: the order of the loops inside a tile, which lets GCC
+vectorize the inner loop. The innermost loop now walks along a row of C instead of summing down a
+column of B. For each k block of a tile:
 
 ```
 v0:  for i, for j:   sum = 0;  for k: sum += A[i][k] * B[k][j];  C[i][j] += sum
