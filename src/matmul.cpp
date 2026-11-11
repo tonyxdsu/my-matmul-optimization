@@ -74,15 +74,23 @@ void multiplyBlock(const Matrix& A, const Matrix& B, Matrix& C,
         numBlocksInner += 1;
     }
 
+    size_t ACols = A.cols; // for hoisting, so GCC doesn't have to reload A.cols every iteration 
+
     for (size_t b = 0; b < numBlocksInner; b++) {
+
         for (size_t i = rowStart; i < rowEnd; i++) {
+            const double* Ai = A.data.data() + i * ACols; // Aik hoisted
+
             for (size_t k = 0; k < blockSize; k++) {
                 size_t AColBRow = b * blockSize + k;
                 if (AColBRow >= A.cols) {
                         break;
                 }
+                double Aik = *(Ai + AColBRow); // Aik hoisted: stores to C can't change this local, so GCC drops one overlap test per k iteration before entering j loop vs. leaving it in the j loop
+                
                 for (size_t j = colStart; j < colEnd; j++) {
-                    C.at(i, j) += A.at(i, AColBRow) * B.at(AColBRow, j);
+                    C.at(i, j) += Aik * B.at(AColBRow, j);
+                    // C.at(i, j) += A.at(i, AColBRow) * B.at(AColBRow, j); // no Aik hoist
                 }
             }
         }
