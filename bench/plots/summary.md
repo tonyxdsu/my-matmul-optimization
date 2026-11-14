@@ -1,24 +1,24 @@
-# Benchmark results: v2
+# Benchmark results: v3
 
 - Machine: AMD Ryzen 7 9800X3D 8-Core Processor; 8 cores, 16 hardware threads; L1d 48 KiB and L2 1 MiB per core, L3 96 MiB shared by all 8 cores
-- Build: gcc 13.3.0, `-std=c++20 -Wall -Wextra -Iinclude -pthread -O3 -march=native -g -falign-loops=64`, git v2
+- Build: gcc 13.3.0, `-std=c++20 -Wall -Wextra -Iinclude -pthread -O3 -march=native -g -falign-loops=64`, git v3
 - Reference: OpenBLAS 0.3.26 NO_LAPACKE DYNAMIC_ARCH NO_AFFINITY Cooperlake MAX_THREADS=64 core=Cooperlake
-- Run: 2026-11-04T03:46:31-07:00, median of 5 repetitions, wall-clock time, every result checked with Freivalds' algorithm
-- Baseline: v1, run 2026-10-24T17:31:44-07:00. The charts draw its blocked kernels as hollow markers and dashed lines; "vs v1" columns are speedups over it.
+- Run: 2026-11-14T02:44:08-07:00, median of 5 repetitions, wall-clock time, every result checked with Freivalds' algorithm
+- Baseline: v2, run 2026-11-04T03:46:31-07:00. The charts draw its blocked kernels as hollow markers and dashed lines; "vs v2" columns are speedups over it.
 
 ## Headline: n = 2000, tile 48
 
 ![GFLOP/s of each implementation at n = 2000](headline.png)
 
-| Implementation | Threads | Time (ms) | GFLOP/s | vs naive | vs v1 | vs OpenBLAS, same threads | CV |
+| Implementation | Threads | Time (ms) | GFLOP/s | vs naive | vs v2 | vs OpenBLAS, same threads | CV |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| multiplyNaive | 1 | 3,851 | 4.16 | 1x | - | 3.1% | 1.7% |
-| multiplyBlocked | 1 | 713 | 22.4 | 5.4x | 1.83x | 16.6% | 0.8% |
-| multiplyBlockedParallel | 8 | 139 | 115 | 27.6x | 1.56x | 20.9% | 2.3% |
-| multiplyBlockedParallel | 16 | 95.7 | 167 | 40.2x | 1.68x | 18.4% | 1.7% |
-| OpenBLAS dgemm | 1 | 118 | 135 | 32.5x | - | 100.0% | 1.7% |
-| OpenBLAS dgemm | 8 | 29.1 | 550 | 132x | - | 100.0% | 2.2% |
-| OpenBLAS dgemm | 16 | 17.6 | 910 | 219x | - | 100.0% | 11.6% |
+| multiplyNaive | 1 | 3,979 | 4.02 | 1x | - | 3.2% | 6.9% |
+| multiplyBlocked | 1 | 533 | 30 | 7.47x | 1.34x | 23.9% | 7.3% |
+| multiplyBlockedParallel | 8 | 95.1 | 168 | 41.8x | 1.46x | 31.5% | 8.0% |
+| multiplyBlockedParallel | 16 | 68.6 | 233 | 58x | 1.39x | 27.7% | 13.8% |
+| OpenBLAS dgemm | 1 | 127 | 126 | 31.3x | - | 100.0% | 1.0% |
+| OpenBLAS dgemm | 8 | 30 | 534 | 133x | - | 100.0% | 5.5% |
+| OpenBLAS dgemm | 16 | 19 | 842 | 209x | - | 100.0% | 56.4% |
 
 ## By matrix size, one thread
 
@@ -28,18 +28,18 @@
 
 GFLOP/s, then hardware-counter events per multiply-add (N = naive, B = blocked).
 
-| n | Naive | Blocked | Blocked / naive | Blocked vs v1 | OpenBLAS | L1D miss N | L1D miss B | L2 miss N | L2 miss B | DRAM fill N | DRAM fill B |
+| n | Naive | Blocked | Blocked / naive | Blocked vs v2 | OpenBLAS | L1D miss N | L1D miss B | L2 miss N | L2 miss B | DRAM fill N | DRAM fill B |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 100 | 6.6 | 14.7 | 2.22x | 1.18x | 156 | 0.131 | 0.0211 | 9.21e-05 | 3.62e-05 | 1e-06 | 1e-07 |
-| 200 | 6.16 | 20.6 | 3.35x | 1.57x | 118 | 0.13 | 0.0158 | 0.000411 | 0.000545 | 5.34e-07 | 4.31e-07 |
-| 300 | 5.63 | 16.3 | 2.89x | 1.20x | 122 | 0.129 | 0.0161 | 0.000706 | 0.00135 | 2.01e-05 | 5.92e-06 |
-| 500 | 5.38 | 17.1 | 3.18x | 1.29x | 127 | 0.152 | 0.0162 | 0.0276 | 0.00181 | 1.89e-06 | 1.58e-05 |
-| 700 | 5.28 | 17.1 | 3.23x | 1.28x | 128 | 0.558 | 0.0145 | 0.0493 | 0.00232 | 0.00011 | 3.37e-05 |
-| 1000 | 4.44 | 22.8 | 5.14x | 1.59x | 133 | 1.13 | 0.0136 | 0.0236 | 0.00357 | 1.16e-05 | 5.5e-05 |
-| 1500 | 4.25 | 16.7 | 3.94x | 1.20x | 134 | 1.13 | 0.0145 | 0.0456 | 0.00513 | 2.74e-06 | 6.04e-05 |
-| 2000 | 4.16 | 22.4 | 5.40x | 1.83x | 135 | 1.09 | 0.013 | 0.0668 | 0.00466 | 1.77e-05 | 6.92e-05 |
-| 3000 | 2.02 | 21.7 | 10.73x | 1.81x | 135 | 1.13 | 0.0128 | 0.0928 | 0.00468 | 0.00455 | 0.000266 |
-| 4000 | 1.22 | 21 | 17.18x | 1.76x | 137 | 1.16 | 0.0132 | 0.638 | 0.00484 | 0.0684 | 0.00129 |
+| 100 | 6.29 | 20.1 | 3.20x | 1.37x | 146 | 0.132 | 0.0202 | 9.79e-05 | 2.74e-05 | 1.58e-06 | 4.98e-07 |
+| 200 | 5.87 | 28.2 | 4.80x | 1.37x | 111 | 0.13 | 0.014 | 0.000607 | 0.000249 | 6.42e-06 | 1.32e-07 |
+| 300 | 5.43 | 22.8 | 4.21x | 1.40x | 113 | 0.134 | 0.0134 | 0.000978 | 0.00094 | 2.17e-05 | 4.42e-06 |
+| 500 | 5.11 | 23.4 | 4.59x | 1.37x | 120 | 0.158 | 0.0134 | 0.0276 | 0.00116 | 5.37e-05 | 8.95e-06 |
+| 700 | 4.95 | 23.2 | 4.68x | 1.36x | 123 | 0.552 | 0.0123 | 0.0493 | 0.00146 | 0.000146 | 0.000105 |
+| 1000 | 4.16 | 30.4 | 7.29x | 1.33x | 125 | 1.13 | 0.0111 | 0.0214 | 0.00128 | 1.36e-05 | 2.71e-05 |
+| 1500 | 4.02 | 23.4 | 5.84x | 1.40x | 125 | 1.13 | 0.0126 | 0.0461 | 0.00229 | 4.93e-05 | 2.33e-05 |
+| 2000 | 4.02 | 30 | 7.47x | 1.34x | 126 | 1.09 | 0.0112 | 0.0654 | 0.00178 | 0.00011 | 7.27e-05 |
+| 3000 | 1.92 | 29.2 | 15.20x | 1.35x | 126 | 1.13 | 0.0109 | 0.0676 | 0.00224 | 0.00702 | 0.000362 |
+| 4000 | 1.22 | 28.5 | 23.40x | 1.36x | 130 | 1.16 | 0.011 | 0.633 | 0.00182 | 0.0734 | 0.00129 |
 
 ## Thread scaling: n = 2000, tile 48
 
@@ -47,33 +47,33 @@ GFLOP/s, then hardware-counter events per multiply-add (N = naive, B = blocked).
 
 Speedup is against single-threaded multiplyBlocked; efficiency divides it by the physical cores in use (at most 8). GHz is the average clock of the busy cores; IPC is per hardware thread.
 
-| Workers | Time (ms) | GFLOP/s | vs v1 | Speedup | Efficiency | GHz | IPC | L1D miss/FMA | OpenBLAS GFLOP/s | OpenBLAS speedup |
+| Workers | Time (ms) | GFLOP/s | vs v2 | Speedup | Efficiency | GHz | IPC | L1D miss/FMA | OpenBLAS GFLOP/s | OpenBLAS speedup |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 857 | 18.7 | 1.66x | 0.832 | 83% | 5.12 | 3.34 | 0.0128 | 135 | 1 |
-| 2 | 476 | 33.6 | 1.54x | 1.5 | 75% | 5.04 | 3.06 | 0.0247 | 255 | 1.89 |
-| 4 | 247 | 64.9 | 1.56x | 2.89 | 72% | 5 | 3.02 | 0.0253 | 408 | 3.02 |
-| 6 | 172 | 93.2 | 1.55x | 4.15 | 69% | 4.96 | 2.98 | 0.0271 | 510 | 3.77 |
-| 8 | 139 | 115 | 1.56x | 5.12 | 64% | 4.87 | 2.81 | 0.0354 | 550 | 4.07 |
-| 10 | 121 | 133 | 1.56x | 5.91 | 74% | 4.83 | 2.62 | 0.0464 | 658 | 4.87 |
-| 12 | 110 | 145 | 1.59x | 6.47 | 81% | 4.82 | 2.41 | 0.0601 | 755 | 5.59 |
-| 14 | 102 | 157 | 1.63x | 6.98 | 87% | 4.79 | 2.25 | 0.0727 | 865 | 6.4 |
-| 16 | 95.7 | 167 | 1.68x | 7.45 | 93% | 4.76 | 2.11 | 0.0847 | 910 | 6.73 |
+| 1 | 524 | 30.5 | 1.63x | 1.02 | 102% | 5.08 | 4.11 | 0.011 | 126 | 1 |
+| 2 | 294 | 54.4 | 1.62x | 1.81 | 90% | 4.96 | 3.74 | 0.013 | 232 | 1.84 |
+| 4 | 161 | 99.6 | 1.54x | 3.32 | 83% | 4.99 | 3.61 | 0.0139 | 408 | 3.25 |
+| 6 | 111 | 144 | 1.54x | 4.78 | 80% | 4.9 | 3.5 | 0.0149 | 488 | 3.88 |
+| 8 | 95.1 | 168 | 1.46x | 5.6 | 70% | 4.76 | 3.17 | 0.0179 | 534 | 4.24 |
+| 10 | 81.7 | 196 | 1.48x | 6.52 | 81% | 4.75 | 3.02 | 0.0198 | 628 | 5 |
+| 12 | 79.9 | 200 | 1.38x | 6.67 | 83% | 4.72 | 2.58 | 0.026 | 710 | 5.65 |
+| 14 | 73.2 | 219 | 1.40x | 7.28 | 91% | 4.59 | 2.56 | 0.0282 | 815 | 6.48 |
+| 16 | 68.6 | 233 | 1.39x | 7.77 | 97% | 4.57 | 2.42 | 0.0301 | 842 | 6.7 |
 
 ## Tile sweep: n = 2000
 
 ![GFLOP/s by tile size at n = 2000](tile_sweep.png)
 
-| Tile | 1 thread GFLOP/s | vs v1 | IPC | L1D miss/FMA | L2 miss/FMA | 8 workers GFLOP/s | vs v1 |
+| Tile | 1 thread GFLOP/s | vs v2 | IPC | L1D miss/FMA | L2 miss/FMA | 8 workers GFLOP/s | vs v2 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| 8 | 7.45 | 1.36x | 4.77 | 0.0347 | 0.00962 | 44.5 | 2.45x |
-| 16 | 11.9 | 1.48x | 4.17 | 0.0194 | 0.00835 | 65.7 | 1.88x |
-| 24 | 15.6 | 1.59x | 4.03 | 0.016 | 0.00875 | 76 | 1.55x |
-| 32 | 18.4 | 1.68x | 3.92 | 0.0153 | 0.00692 | 93.9 | 1.54x |
-| 48 | 22.4 | 1.83x | 3.67 | 0.013 | 0.00466 | 115 | 1.56x |
-| 64 | 23.9 | 1.89x | 3.42 | 0.0214 | 0.00367 | 127 | 1.55x |
-| 96 | 22.7 | 1.89x | 2.7 | 0.151 | 0.00236 | 136 | 1.55x |
-| 128 | 24.6 | 1.88x | 2.66 | 0.142 | 0.00218 | 152 | 1.48x |
-| 192 | 26.6 | 1.78x | 2.56 | 0.134 | 0.00197 | 171 | 1.49x |
-| 256 | 28.2 | 1.80x | 2.56 | 0.133 | 0.00322 | 186 | 1.56x |
-| 384 | 25.7 | 1.67x | 2.22 | 0.145 | 0.0864 | 151 | 1.42x |
-| 512 | 25.2 | 1.66x | 2.09 | 0.142 | 0.12 | 130 | 1.21x |
+| 8 | 11.3 | 1.52x | 5.29 | 0.0375 | 0.00915 | 72.3 | 1.62x |
+| 16 | 16 | 1.34x | 4.11 | 0.0198 | 0.00582 | 100 | 1.53x |
+| 24 | 19.9 | 1.28x | 3.93 | 0.0141 | 0.00589 | 104 | 1.37x |
+| 32 | 23.5 | 1.28x | 3.85 | 0.0147 | 0.00399 | 129 | 1.37x |
+| 48 | 30 | 1.34x | 4.05 | 0.0112 | 0.00178 | 168 | 1.46x |
+| 64 | 35.1 | 1.47x | 4.22 | 0.0146 | 0.00238 | 189 | 1.49x |
+| 96 | 34.5 | 1.52x | 3.81 | 0.13 | 0.00197 | 202 | 1.49x |
+| 128 | 35.9 | 1.46x | 3.62 | 0.129 | 0.00178 | 212 | 1.40x |
+| 192 | 36.6 | 1.38x | 3.44 | 0.127 | 0.00156 | 216 | 1.26x |
+| 256 | 35.5 | 1.26x | 3.21 | 0.129 | 0.00158 | 202 | 1.08x |
+| 384 | 30.1 | 1.17x | 2.59 | 0.135 | 0.0246 | 159 | 1.05x |
+| 512 | 27.7 | 1.10x | 2.29 | 0.139 | 0.0918 | 131 | 1.01x |

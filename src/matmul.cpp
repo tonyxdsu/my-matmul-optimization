@@ -74,15 +74,27 @@ void multiplyBlock(const Matrix& A, const Matrix& B, Matrix& C,
         numBlocksInner += 1;
     }
 
+    size_t ACols = A.cols; 
+    size_t BCols = B.cols;
+
+    const double* APtr = A.data.data();
+    const double* BPtr = B.data.data();
+    double* CPtr = C.data.data();
+
     for (size_t b = 0; b < numBlocksInner; b++) {
+        size_t kStart = b * blockSize;
+        size_t kEnd = std::min(ACols, kStart + blockSize);
+
         for (size_t i = rowStart; i < rowEnd; i++) {
-            for (size_t k = 0; k < blockSize; k++) {
-                size_t AColBRow = b * blockSize + k;
-                if (AColBRow >= A.cols) {
-                        break;
-                }
+            const double* AiPtr = APtr + i * ACols;
+            double* CiPtr = CPtr + i * BCols;
+
+            for (size_t k = kStart; k < kEnd; k++) {
+                double Aik = AiPtr[k];
+                const double* BkPtr = BPtr + k * BCols;
+                
                 for (size_t j = colStart; j < colEnd; j++) {
-                    C.at(i, j) += A.at(i, AColBRow) * B.at(AColBRow, j);
+                    CiPtr[j] += Aik * BkPtr[j];
                 }
             }
         }
