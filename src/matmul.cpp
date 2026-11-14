@@ -80,23 +80,18 @@ void multiplyBlock(const Matrix& A, const Matrix& B, Matrix& C,
     const double* Bptr = B.data.data();
 
     for (size_t b = 0; b < numBlocksInner; b++) {
+        size_t kStart = b * blockSize;
+        size_t kEnd = std::min(ACols, kStart + blockSize);
 
         for (size_t i = rowStart; i < rowEnd; i++) {
             const double* Aiptr = A.data.data() + i * ACols; // Aik hoisted
 
-            for (size_t k = 0; k < blockSize; k++) {
-                size_t AColBRow = b * blockSize + k;
-                if (AColBRow >= A.cols) {
-                        break;
-                }
-                double Aik = *(Aiptr + AColBRow); // Aik hoisted: stores to C can't change this local, so GCC drops one overlap test per k iteration before entering j loop vs. leaving it in the j loop
-                const double* Bkptr = Bptr + AColBRow * BCols;
+            for (size_t k = kStart; k < kEnd; k++) {
+                double Aik = *(Aiptr + k); 
+                const double* Bkptr = Bptr + k * BCols; 
                 
                 for (size_t j = colStart; j < colEnd; j++) {
                     C.at(i, j) += Aik * *(Bkptr + j);
-
-                    // C.at(i, j) += Aik * B.at(AColBRow, j);
-                    // C.at(i, j) += A.at(i, AColBRow) * B.at(AColBRow, j); // no Aik hoist
                 }
             }
         }
