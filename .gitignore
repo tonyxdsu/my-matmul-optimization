@@ -23,3 +23,9 @@ bin/
 # Python bytecode cache
 __pycache__/
 *.pdf
+
+# Perf guide GIFs (hosted in the Claude Docs guide; scripts stay tracked)
+docs/guide/*.gif
+
+# Benchmark runs from uncommitted code
+bench/results/*-dirty.json

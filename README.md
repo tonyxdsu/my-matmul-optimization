@@ -17,7 +17,7 @@ OpenBLAS as a reference.
 - [v0: cache blocking](#v0-cache-blocking)
 - [v1: loop interchange for auto-vectorization](#v1-loop-interchange-i-k-j-for-auto-vectorization)
 - [v2: cache-line-aligned storage](#v2-cache-line-aligned-storage)
-- v3: promise no aliasing, hoist loop invariants (planned)
+- [v3: hoist loop invariants](#v3-hoist-loop-invariants)
 - v4: register blocking (planned)
 
 ## v0: cache blocking
@@ -193,29 +193,194 @@ the unchanged OpenBLAS and naive kernels read 10-12% higher too, at the same FLO
 - **Next bottleneck:** unchanged. C still makes a round trip through memory for every k, and v2
   reaches only 4.31 of a possible 32 FLOP/cycle.
 
+## v3: hoist loop invariants
+
+v3 changes `multiplyBlock` again, but not what it computes or the order of its loops. Values that
+stay the same through an inner loop are now worked out once, before it:
+
+- the data pointers of A, B and C and the widths of A and B, read from the `Matrix` objects once
+- the end of each k block, computed once with `std::min` instead of an `if (...) break` on every k
+- the row pointers of A and C, once per i
+- `A[i][k]` and the row pointer of B, once per k, before the j loop
+
+At n = 2000 and tile 48, single-threaded `multiplyBlocked` went from 4.31 to 6.10 FLOP/cycle
+(1.42x), and `multiplyBlockedParallel` on 16 workers from 167 to 233 GFLOP/s (1.39x). This time
+GFLOP/s and the "vs v2" columns below understate the gain by about 5% (22.4 to 30.0 GFLOP/s,
+1.34x): the unchanged OpenBLAS and naive kernels read about 5% lower than in v2's run, at the
+same FLOP/cycle.
+
+| One thread, n = 2000, tile 48 | v2 | v3 |
+|---|---:|---:|
+| GFLOP/s | 22.4 | 30.0 |
+| FLOP/cycle (peak 32) | 4.31 | 6.10 |
+| Instructions per multiply-add | 1.70 | 1.33 |
+| Cycles per multiply-add | 0.46 | 0.33 |
+| IPC | 3.67 | 4.05 |
+
+### Where the instructions went
+
+The vector loop is the same 6 instructions per 8 columns as in v1 and v2. What changed is the
+setup GCC runs around it once per row update: one i and one k, which at tile 48 is 48
+multiply-adds, or 6 passes of the vector loop.
+
+![Instructions in one row update at n = 2000, tile 48: v2 runs 36 in the vector loop and 45 of setup, 81 in all; v3 runs the same 36 and 27 of setup, 63 in all](docs/v3/bookkeeping.png)
+
+| Instructions per row update | v2 | v3 |
+|---|---:|---:|
+| Vector loop, 6 passes of 6 | 36 | 36 |
+| Overlap checks | 14 | 5 |
+| Reloads and spills | 9 | 2 |
+| Length checks | 8 | 6 |
+| Address arithmetic | 7 | 3 |
+| Loop control | 6 | 3 |
+| Load `A[i][k]` into all 8 lanes | 1 | 2 |
+| Padding (`nop`) | 0 | 6 |
+| **Total** | **81** | **63** |
+| Total / 48 multiply-adds | 1.69 | 1.31 |
+| Measured per multiply-add | 1.70 | 1.33 |
+
+The counters read slightly more than total / 48 because the i loop's own setup is spread over its
+row updates.
+
+- **Overlap checks, 14 to 5.** GCC cannot prove that storing to C's row leaves `A[i][k]` and B's
+  row unchanged, so before the vector loop it checks that they don't overlap, and runs a scalar
+  loop if they do. Copied into the local `Aik`, `A[i][k]` needs no check, so only the check of B's
+  row against C's is left. That one is why the vectorizer report still says "loop versioned for
+  vectorization because of possible aliasing".
+- **Reloads and spills, 9 to 2.** On every row update, v2 read `&A` and `&B` from the stack, then
+  `A.data`, `B.data` and `B.cols` from the `Matrix` objects, and stored and reloaded a value it
+  had no register for. v3 reads the objects once per call; its two are values GCC keeps in spare vector
+  registers.
+- **Address arithmetic and loop control, 13 to 6.** v2 multiplied k by B's width on every row
+  update and tested two ways out of the k loop: the end of the block and the `break`. v3 steps
+  its pointers forward by a fixed amount and has one test.
+- **Padding, 0 to 6.** `-falign-loops=64` (in the Makefile) starts v3's vector loop on a 64-byte
+  boundary, and the `nop`s that fill the gap before it run on every row update. They do no work,
+  but they count as instructions.
+
+The row update in each version, in the order it runs (from `objdump -d -C`, branch targets cut).
+GCC inlined v2's `multiplyBlock` into `multiplyBlocked`; v3's is called. Each line is tagged with
+its row in the table. v2:
+
+```
+cmp          %rbx,%r10                 # length: any columns at all?
+jae          ...                       # length
+mov          0xe8(%rsp),%rax           # reload: &A from the stack
+mov          (%rax),%rdx               # reload: A.data
+mov          0xd8(%rsp),%rax           # reload: &B from the stack
+mov          0x20(%rax),%rcx           # reload: B.cols
+mov          (%rax),%r8                # reload: B.data
+lea          (%rdx,%r15,1),%r9         # address: &A[i][k]
+imul         %rdi,%rcx                 # address: k * B.cols
+cmpq         $0x2,0x120(%rsp)          # length: at least 4 columns?
+lea          (%rcx,%r10,1),%rax        # address: k * B.cols + colStart
+mov          %rax,0x130(%rsp)          # spill: to the stack
+jbe          ...                       # length
+lea          0x8(%rdx,%r15,1),%rdx     # overlap: is A[i][k] inside C's row?
+lea          0x1(%rcx,%r10,1),%r11     # address: where B's row starts, + 1
+shl          $0x3,%r11                 # address: ... in bytes
+cmp          %rdx,%rsi                 # overlap
+vmovq        %xmm8,%rdx                # overlap
+setae        0x128(%rsp)               # overlap
+movzbl       0x128(%rsp),%eax          # overlap
+cmp          %rdx,%r9                  # overlap
+setae        %dl                       # overlap
+or           %al,%dl                   # overlap
+je           ...                       # overlap
+lea          (%r8,%r11,1),%rdx         # overlap: does C's row start 8 to 56 bytes after B's?
+mov          %rsi,%rax                 # overlap
+sub          %rdx,%rax                 # overlap
+cmp          $0x30,%rax                # overlap
+jbe          ...                       # overlap
+cmpq         $0x6,0x120(%rsp)          # length: at least 8 columns?
+jbe          ...                       # length
+vbroadcastsd (%r9),%zmm6               # A[i][k] into all 8 lanes
+mov          0x130(%rsp),%rax          # reload: back from the stack
+lea          -0x8(%r8,%r11,1),%r11     # address: B's row
+xor          %edx,%edx                 # loop: j = 0
+...                                    # the vector loop: 6 passes of 6 instructions
+mov          %rax,0x130(%rsp)          # spill: the same value, again
+testb        $0x7,0xb8(%rsp)           # length: any columns left over?
+je           ...                       # length
+mov          0x118(%rsp),%rax          # reload: end of the k block
+cmp          %rax,%rdi                 # loop: end of the k block?
+je           ...                       # loop
+inc          %rdi                      # loop: k++
+add          $0x8,%r15                 # address: next A[i][k]
+cmp          %r13,%rdi                 # loop: k < A.cols? (the break)
+jb           ...                       # loop
+```
+
+v3:
+
+```
+vmovsd       (%r10),%xmm1              # Aik = A[i][k]
+cmp          $0x2,%rbx                 # length: at least 4 columns?
+jbe          ...                       # length
+lea          0x8(%rdx),%r11            # overlap: does C's row start 8 to 56 bytes after B's?
+mov          %rax,%r8                  # overlap
+sub          %r11,%r8                  # overlap
+cmp          $0x30,%r8                 # overlap
+ja           ...                       # overlap
+cmp          $0x6,%rbx                 # length: at least 8 columns?
+jbe          ...                       # length
+vbroadcastsd %xmm1,%zmm2               # Aik into all 8 lanes
+xor          %r8d,%r8d                 # loop: j = 0
+nopw         0x0(%rax,%rax,1)          # padding: 6 nops like this one, up to a 64-byte boundary
+...                                    # the vector loop: 6 passes of 6 instructions
+cmpq         $0x0,0x28(%rsp)           # length: any columns left over?
+je           ...                       # length
+vmovq        %xmm6,%rdi                # reload: B's row width in bytes, from a vector register
+add          $0x8,%r10                 # address: next A[i][k]
+add          %rdi,%rdx                 # address: next row of B
+vmovq        %xmm4,%rdi                # reload: B.cols, from a vector register
+add          %rdi,%rsi                 # address: B's row index, for leftover columns
+cmp          %r12,%r10                 # loop: end of the k block?
+jne          ...                       # loop
+```
+
+### Notes
+
+- **Cycles fell further than instructions:** 30% fewer cycles per multiply-add against 22% fewer
+  instructions, so IPC rose from 3.67 to 4.05. The setup that went away was not running in the
+  gaps beside the FMAs; it was holding them up.
+- **Tile 192 is now the best:** 7.64 FLOP/cycle (36.6 GFLOP/s), with 96 to 256 within 4% of it.
+  The gain is largest at tiles 64 to 128 (1.53-1.66x) and smallest at 384 and 512 (1.25x and
+  1.15x), where B's tile no longer fits in the 1 MiB L2: L2 misses per multiply-add go from 0.002
+  at tile 192 to 0.025 and 0.092. `kBlockSize` stays 48 so these tables line up with v2's.
+- **Sizes whose rows start mid-line still trail.** n = 100, 300, 500, 700 and 1500 reach 4.0-4.8
+  FLOP/cycle, against 5.7-6.3 at n = 200, 1000, 2000, 3000 and 4000: the same zigzag as in v2.
+- **This run was noisier than v2's.** Some repetitions came in low (tile 48 ranged from 5.49 to
+  6.26 FLOP/cycle, a CV of 7.3% in the table below) because of other activity on the machine: a
+  separate 10-repetition run of tile 48 gave 6.12 FLOP/cycle, varying by 0.7%. The multi-threaded
+  runs were noisier too (CV 8-14% for `multiplyBlockedParallel`), so read their "vs v2" columns as
+  rough.
+- **Next bottleneck:** C still makes a round trip through memory for every k, two loads and a
+  store per vector FMA, and v3 reaches 6.10 of a possible 32 FLOP/cycle.
+
 <!-- results:start -->
 
-## Benchmark results: v2
+## Benchmark results: v3
 
 - Machine: AMD Ryzen 7 9800X3D 8-Core Processor; 8 cores, 16 hardware threads; L1d 48 KiB and L2 1 MiB per core, L3 96 MiB shared by all 8 cores
-- Build: gcc 13.3.0, `-std=c++20 -Wall -Wextra -Iinclude -pthread -O3 -march=native -g -falign-loops=64`, git v2
+- Build: gcc 13.3.0, `-std=c++20 -Wall -Wextra -Iinclude -pthread -O3 -march=native -g -falign-loops=64`, git v3
 - Reference: OpenBLAS 0.3.26 NO_LAPACKE DYNAMIC_ARCH NO_AFFINITY Cooperlake MAX_THREADS=64 core=Cooperlake
-- Run: 2026-11-04T03:46:31-07:00, median of 5 repetitions, wall-clock time, every result checked with Freivalds' algorithm
-- Baseline: v1, run 2026-10-24T17:31:44-07:00. The charts draw its blocked kernels as hollow markers and dashed lines; "vs v1" columns are speedups over it.
+- Run: 2026-11-14T02:44:08-07:00, median of 5 repetitions, wall-clock time, every result checked with Freivalds' algorithm
+- Baseline: v2, run 2026-11-04T03:46:31-07:00. The charts draw its blocked kernels as hollow markers and dashed lines; "vs v2" columns are speedups over it.
 
 ### Headline: n = 2000, tile 48
 
 ![GFLOP/s of each implementation at n = 2000](bench/plots/headline.png)
 
-| Implementation | Threads | Time (ms) | GFLOP/s | vs naive | vs v1 | vs OpenBLAS, same threads | CV |
+| Implementation | Threads | Time (ms) | GFLOP/s | vs naive | vs v2 | vs OpenBLAS, same threads | CV |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| multiplyNaive | 1 | 3,851 | 4.16 | 1x | - | 3.1% | 1.7% |
-| multiplyBlocked | 1 | 713 | 22.4 | 5.4x | 1.83x | 16.6% | 0.8% |
-| multiplyBlockedParallel | 8 | 139 | 115 | 27.6x | 1.56x | 20.9% | 2.3% |
-| multiplyBlockedParallel | 16 | 95.7 | 167 | 40.2x | 1.68x | 18.4% | 1.7% |
-| OpenBLAS dgemm | 1 | 118 | 135 | 32.5x | - | 100.0% | 1.7% |
-| OpenBLAS dgemm | 8 | 29.1 | 550 | 132x | - | 100.0% | 2.2% |
-| OpenBLAS dgemm | 16 | 17.6 | 910 | 219x | - | 100.0% | 11.6% |
+| multiplyNaive | 1 | 3,979 | 4.02 | 1x | - | 3.2% | 6.9% |
+| multiplyBlocked | 1 | 533 | 30 | 7.47x | 1.34x | 23.9% | 7.3% |
+| multiplyBlockedParallel | 8 | 95.1 | 168 | 41.8x | 1.46x | 31.5% | 8.0% |
+| multiplyBlockedParallel | 16 | 68.6 | 233 | 58x | 1.39x | 27.7% | 13.8% |
+| OpenBLAS dgemm | 1 | 127 | 126 | 31.3x | - | 100.0% | 1.0% |
+| OpenBLAS dgemm | 8 | 30 | 534 | 133x | - | 100.0% | 5.5% |
+| OpenBLAS dgemm | 16 | 19 | 842 | 209x | - | 100.0% | 56.4% |
 
 ### By matrix size, one thread
 
@@ -225,18 +390,18 @@ the unchanged OpenBLAS and naive kernels read 10-12% higher too, at the same FLO
 
 GFLOP/s, then hardware-counter events per multiply-add (N = naive, B = blocked).
 
-| n | Naive | Blocked | Blocked / naive | Blocked vs v1 | OpenBLAS | L1D miss N | L1D miss B | L2 miss N | L2 miss B | DRAM fill N | DRAM fill B |
+| n | Naive | Blocked | Blocked / naive | Blocked vs v2 | OpenBLAS | L1D miss N | L1D miss B | L2 miss N | L2 miss B | DRAM fill N | DRAM fill B |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 100 | 6.6 | 14.7 | 2.22x | 1.18x | 156 | 0.131 | 0.0211 | 9.21e-05 | 3.62e-05 | 1e-06 | 1e-07 |
-| 200 | 6.16 | 20.6 | 3.35x | 1.57x | 118 | 0.13 | 0.0158 | 0.000411 | 0.000545 | 5.34e-07 | 4.31e-07 |
-| 300 | 5.63 | 16.3 | 2.89x | 1.20x | 122 | 0.129 | 0.0161 | 0.000706 | 0.00135 | 2.01e-05 | 5.92e-06 |
-| 500 | 5.38 | 17.1 | 3.18x | 1.29x | 127 | 0.152 | 0.0162 | 0.0276 | 0.00181 | 1.89e-06 | 1.58e-05 |
-| 700 | 5.28 | 17.1 | 3.23x | 1.28x | 128 | 0.558 | 0.0145 | 0.0493 | 0.00232 | 0.00011 | 3.37e-05 |
-| 1000 | 4.44 | 22.8 | 5.14x | 1.59x | 133 | 1.13 | 0.0136 | 0.0236 | 0.00357 | 1.16e-05 | 5.5e-05 |
-| 1500 | 4.25 | 16.7 | 3.94x | 1.20x | 134 | 1.13 | 0.0145 | 0.0456 | 0.00513 | 2.74e-06 | 6.04e-05 |
-| 2000 | 4.16 | 22.4 | 5.40x | 1.83x | 135 | 1.09 | 0.013 | 0.0668 | 0.00466 | 1.77e-05 | 6.92e-05 |
-| 3000 | 2.02 | 21.7 | 10.73x | 1.81x | 135 | 1.13 | 0.0128 | 0.0928 | 0.00468 | 0.00455 | 0.000266 |
-| 4000 | 1.22 | 21 | 17.18x | 1.76x | 137 | 1.16 | 0.0132 | 0.638 | 0.00484 | 0.0684 | 0.00129 |
+| 100 | 6.29 | 20.1 | 3.20x | 1.37x | 146 | 0.132 | 0.0202 | 9.79e-05 | 2.74e-05 | 1.58e-06 | 4.98e-07 |
+| 200 | 5.87 | 28.2 | 4.80x | 1.37x | 111 | 0.13 | 0.014 | 0.000607 | 0.000249 | 6.42e-06 | 1.32e-07 |
+| 300 | 5.43 | 22.8 | 4.21x | 1.40x | 113 | 0.134 | 0.0134 | 0.000978 | 0.00094 | 2.17e-05 | 4.42e-06 |
+| 500 | 5.11 | 23.4 | 4.59x | 1.37x | 120 | 0.158 | 0.0134 | 0.0276 | 0.00116 | 5.37e-05 | 8.95e-06 |
+| 700 | 4.95 | 23.2 | 4.68x | 1.36x | 123 | 0.552 | 0.0123 | 0.0493 | 0.00146 | 0.000146 | 0.000105 |
+| 1000 | 4.16 | 30.4 | 7.29x | 1.33x | 125 | 1.13 | 0.0111 | 0.0214 | 0.00128 | 1.36e-05 | 2.71e-05 |
+| 1500 | 4.02 | 23.4 | 5.84x | 1.40x | 125 | 1.13 | 0.0126 | 0.0461 | 0.00229 | 4.93e-05 | 2.33e-05 |
+| 2000 | 4.02 | 30 | 7.47x | 1.34x | 126 | 1.09 | 0.0112 | 0.0654 | 0.00178 | 0.00011 | 7.27e-05 |
+| 3000 | 1.92 | 29.2 | 15.20x | 1.35x | 126 | 1.13 | 0.0109 | 0.0676 | 0.00224 | 0.00702 | 0.000362 |
+| 4000 | 1.22 | 28.5 | 23.40x | 1.36x | 130 | 1.16 | 0.011 | 0.633 | 0.00182 | 0.0734 | 0.00129 |
 
 ### Thread scaling: n = 2000, tile 48
 
@@ -244,36 +409,36 @@ GFLOP/s, then hardware-counter events per multiply-add (N = naive, B = blocked).
 
 Speedup is against single-threaded multiplyBlocked; efficiency divides it by the physical cores in use (at most 8). GHz is the average clock of the busy cores; IPC is per hardware thread.
 
-| Workers | Time (ms) | GFLOP/s | vs v1 | Speedup | Efficiency | GHz | IPC | L1D miss/FMA | OpenBLAS GFLOP/s | OpenBLAS speedup |
+| Workers | Time (ms) | GFLOP/s | vs v2 | Speedup | Efficiency | GHz | IPC | L1D miss/FMA | OpenBLAS GFLOP/s | OpenBLAS speedup |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 857 | 18.7 | 1.66x | 0.832 | 83% | 5.12 | 3.34 | 0.0128 | 135 | 1 |
-| 2 | 476 | 33.6 | 1.54x | 1.5 | 75% | 5.04 | 3.06 | 0.0247 | 255 | 1.89 |
-| 4 | 247 | 64.9 | 1.56x | 2.89 | 72% | 5 | 3.02 | 0.0253 | 408 | 3.02 |
-| 6 | 172 | 93.2 | 1.55x | 4.15 | 69% | 4.96 | 2.98 | 0.0271 | 510 | 3.77 |
-| 8 | 139 | 115 | 1.56x | 5.12 | 64% | 4.87 | 2.81 | 0.0354 | 550 | 4.07 |
-| 10 | 121 | 133 | 1.56x | 5.91 | 74% | 4.83 | 2.62 | 0.0464 | 658 | 4.87 |
-| 12 | 110 | 145 | 1.59x | 6.47 | 81% | 4.82 | 2.41 | 0.0601 | 755 | 5.59 |
-| 14 | 102 | 157 | 1.63x | 6.98 | 87% | 4.79 | 2.25 | 0.0727 | 865 | 6.4 |
-| 16 | 95.7 | 167 | 1.68x | 7.45 | 93% | 4.76 | 2.11 | 0.0847 | 910 | 6.73 |
+| 1 | 524 | 30.5 | 1.63x | 1.02 | 102% | 5.08 | 4.11 | 0.011 | 126 | 1 |
+| 2 | 294 | 54.4 | 1.62x | 1.81 | 90% | 4.96 | 3.74 | 0.013 | 232 | 1.84 |
+| 4 | 161 | 99.6 | 1.54x | 3.32 | 83% | 4.99 | 3.61 | 0.0139 | 408 | 3.25 |
+| 6 | 111 | 144 | 1.54x | 4.78 | 80% | 4.9 | 3.5 | 0.0149 | 488 | 3.88 |
+| 8 | 95.1 | 168 | 1.46x | 5.6 | 70% | 4.76 | 3.17 | 0.0179 | 534 | 4.24 |
+| 10 | 81.7 | 196 | 1.48x | 6.52 | 81% | 4.75 | 3.02 | 0.0198 | 628 | 5 |
+| 12 | 79.9 | 200 | 1.38x | 6.67 | 83% | 4.72 | 2.58 | 0.026 | 710 | 5.65 |
+| 14 | 73.2 | 219 | 1.40x | 7.28 | 91% | 4.59 | 2.56 | 0.0282 | 815 | 6.48 |
+| 16 | 68.6 | 233 | 1.39x | 7.77 | 97% | 4.57 | 2.42 | 0.0301 | 842 | 6.7 |
 
 ### Tile sweep: n = 2000
 
 ![GFLOP/s by tile size at n = 2000](bench/plots/tile_sweep.png)
 
-| Tile | 1 thread GFLOP/s | vs v1 | IPC | L1D miss/FMA | L2 miss/FMA | 8 workers GFLOP/s | vs v1 |
+| Tile | 1 thread GFLOP/s | vs v2 | IPC | L1D miss/FMA | L2 miss/FMA | 8 workers GFLOP/s | vs v2 |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| 8 | 7.45 | 1.36x | 4.77 | 0.0347 | 0.00962 | 44.5 | 2.45x |
-| 16 | 11.9 | 1.48x | 4.17 | 0.0194 | 0.00835 | 65.7 | 1.88x |
-| 24 | 15.6 | 1.59x | 4.03 | 0.016 | 0.00875 | 76 | 1.55x |
-| 32 | 18.4 | 1.68x | 3.92 | 0.0153 | 0.00692 | 93.9 | 1.54x |
-| 48 | 22.4 | 1.83x | 3.67 | 0.013 | 0.00466 | 115 | 1.56x |
-| 64 | 23.9 | 1.89x | 3.42 | 0.0214 | 0.00367 | 127 | 1.55x |
-| 96 | 22.7 | 1.89x | 2.7 | 0.151 | 0.00236 | 136 | 1.55x |
-| 128 | 24.6 | 1.88x | 2.66 | 0.142 | 0.00218 | 152 | 1.48x |
-| 192 | 26.6 | 1.78x | 2.56 | 0.134 | 0.00197 | 171 | 1.49x |
-| 256 | 28.2 | 1.80x | 2.56 | 0.133 | 0.00322 | 186 | 1.56x |
-| 384 | 25.7 | 1.67x | 2.22 | 0.145 | 0.0864 | 151 | 1.42x |
-| 512 | 25.2 | 1.66x | 2.09 | 0.142 | 0.12 | 130 | 1.21x |
+| 8 | 11.3 | 1.52x | 5.29 | 0.0375 | 0.00915 | 72.3 | 1.62x |
+| 16 | 16 | 1.34x | 4.11 | 0.0198 | 0.00582 | 100 | 1.53x |
+| 24 | 19.9 | 1.28x | 3.93 | 0.0141 | 0.00589 | 104 | 1.37x |
+| 32 | 23.5 | 1.28x | 3.85 | 0.0147 | 0.00399 | 129 | 1.37x |
+| 48 | 30 | 1.34x | 4.05 | 0.0112 | 0.00178 | 168 | 1.46x |
+| 64 | 35.1 | 1.47x | 4.22 | 0.0146 | 0.00238 | 189 | 1.49x |
+| 96 | 34.5 | 1.52x | 3.81 | 0.13 | 0.00197 | 202 | 1.49x |
+| 128 | 35.9 | 1.46x | 3.62 | 0.129 | 0.00178 | 212 | 1.40x |
+| 192 | 36.6 | 1.38x | 3.44 | 0.127 | 0.00156 | 216 | 1.26x |
+| 256 | 35.5 | 1.26x | 3.21 | 0.129 | 0.00158 | 202 | 1.08x |
+| 384 | 30.1 | 1.17x | 2.59 | 0.135 | 0.0246 | 159 | 1.05x |
+| 512 | 27.7 | 1.10x | 2.29 | 0.139 | 0.0918 | 131 | 1.01x |
 
 <!-- results:end -->
 
