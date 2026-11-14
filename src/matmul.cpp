@@ -90,11 +90,11 @@ void multiplyBlock(const Matrix& A, const Matrix& B, Matrix& C,
             double* CiPtr = CPtr + i * BCols;
 
             for (size_t k = kStart; k < kEnd; k++) {
-                double Aik = *(AiPtr + k);
+                double Aik = AiPtr[k];
                 const double* BkPtr = BPtr + k * BCols;
                 
                 for (size_t j = colStart; j < colEnd; j++) {
-                    *(CiPtr + j) += Aik * *(BkPtr + j);
+                    CiPtr[j] += Aik * BkPtr[j];
                 }
             }
         }
