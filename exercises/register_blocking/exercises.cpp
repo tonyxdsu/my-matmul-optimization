@@ -73,14 +73,53 @@
 
 template <int ACC>
 [[gnu::noinline]] double sumSquares(const double* x, std::size_t n) {
-    // TODO(2)
-    return 0.0;
+    __m512d accArr[ACC];
+    #pragma GCC unroll 16
+    for (int a = 0; a < ACC; a++) {
+        accArr[a] = _mm512_setzero_pd();
+    }
+
+    for (size_t i = 0; i < n; i += ACC * 8) {
+        
+        #pragma GCC unroll 16
+        for (int a = 0; a < ACC; a++) {
+            __m512d xVec = _mm512_loadu_pd(x + i + a*8);
+            accArr[a] = _mm512_fmadd_pd(xVec, xVec, accArr[a]);
+        }
+    }
+
+    #pragma GCC unroll 16
+    for (int a = 0; a < ACC - 1; a++) {
+        accArr[a+1] = _mm512_add_pd(accArr[a], accArr[a+1]);
+    }
+
+    return _mm512_reduce_add_pd(accArr[ACC-1]);
 }
 
 template <int ACC>
 [[gnu::noinline]] double dot(const double* x, const double* y, std::size_t n) {
-    // TODO(2)
-    return 0.0;
+    __m512d accArr[ACC];
+    #pragma GCC unroll 16
+    for (int a = 0; a < ACC; a++) {
+        accArr[a] = _mm512_setzero_pd();
+    }
+
+    for (size_t i = 0; i < n; i += ACC * 8) {
+        
+        #pragma GCC unroll 16
+        for (int a = 0; a < ACC; a++) {
+            __m512d xVec = _mm512_loadu_pd(x + i + a*8);
+            __m512d yVec = _mm512_loadu_pd(y + i + a*8);
+            accArr[a] = _mm512_fmadd_pd(xVec, yVec, accArr[a]);
+        }
+    }
+
+    #pragma GCC unroll 16
+    for (int a = 0; a < ACC - 1; a++) {
+        accArr[a+1] = _mm512_add_pd(accArr[a], accArr[a+1]);
+    }
+
+    return _mm512_reduce_add_pd(accArr[ACC-1]);
 }
 
 // =============================================================================================
