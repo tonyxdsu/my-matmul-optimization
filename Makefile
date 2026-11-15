@@ -197,6 +197,27 @@ chain-demo: $(BUILD_DIR)/chain_demo_nosimd $(BUILD_DIR)/chain_demo
 	@echo
 	taskset -c $(EXP_CPU) ./$(BUILD_DIR)/chain_demo
 
+# Register-blocking assignment (exercises/register_blocking/, see ASSIGNMENT.md there): your
+# exercises.cpp and the reference solution.cpp, each built with the same harness and run pinned to
+# core EXP_CPU. EX=n runs exercise n only. -Wno-unused-parameter keeps the stubs quiet.
+REGBLOCK_DIR = exercises/register_blocking
+REGBLOCK_DEPS = $(REGBLOCK_DIR)/harness.hpp $(BENCH_DIR)/perf_counters.cpp $(BENCH_DIR)/perf_counters.hpp
+REGBLOCK_FLAGS = $(CXXFLAGS) -Wno-unused-parameter -I$(BENCH_DIR) -DEXP_CXXFLAGS='"$(CXXFLAGS)"'
+
+$(BUILD_DIR)/regblock: $(REGBLOCK_DIR)/exercises.cpp $(REGBLOCK_DEPS)
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(REGBLOCK_FLAGS) $< $(BENCH_DIR)/perf_counters.cpp -o $@
+
+$(BUILD_DIR)/regblock_solution: $(REGBLOCK_DIR)/solution.cpp $(REGBLOCK_DEPS)
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(REGBLOCK_FLAGS) $< $(BENCH_DIR)/perf_counters.cpp -o $@
+
+regblock: $(BUILD_DIR)/regblock
+	taskset -c $(EXP_CPU) ./$(BUILD_DIR)/regblock $(EX)
+
+regblock-solution: $(BUILD_DIR)/regblock_solution
+	taskset -c $(EXP_CPU) ./$(BUILD_DIR)/regblock_solution $(EX)
+
 # Clean
 clean:
 	rm -rf $(BUILD_DIR)
@@ -207,4 +228,4 @@ run: all
 
 -include $(wildcard $(BUILD_DIR)/*.d)
 
-.PHONY: all test bench bench-run bench-quick bench-aocl bench-aocl-run bench-plot bench-compare chain-demo clean run
+.PHONY: all test bench bench-run bench-quick bench-aocl bench-aocl-run bench-plot bench-compare chain-demo regblock regblock-solution clean run
