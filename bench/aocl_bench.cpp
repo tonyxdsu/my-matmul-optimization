@@ -3,8 +3,8 @@
 //
 // AOCL-BLAS and OpenBLAS export the same BLAS functions, so one program cannot link both. This
 // file is its own suite, build/bench_aocl, with its own main(); the Makefile keeps it out of
-// build/bench. Like the OpenBLAS benchmark, it writes into a result allocated once outside the
-// timed loop, which is how BLAS is normally called.
+// build/bench. Like the OpenBLAS benchmark and the matmul.hpp functions, each timed call
+// allocates a zeroed result and computes into it, so every side is timed doing the same job.
 
 #include "bench_common.hpp"
 #include "matmul.hpp"
@@ -17,6 +17,7 @@
 #include <chrono>
 #include <string>
 #include <thread>
+#include <utility>
 
 namespace {
 
@@ -27,20 +28,28 @@ void BM_AOCL(benchmark::State& state) {
     const auto dim = static_cast<int>(n);
     bli_thread_set_num_threads(workers);
     const Matrix A = randomMatrix(n, n, 1), B = randomMatrix(n, n, 2);
-    Matrix C(n, n);
+    Matrix C(0, 0);
+    bench::warmUpResultMemory(n, n);
 
     // AOCL-BLAS's OpenMP threads may already exist from an earlier benchmark, so they are not
     // always counted. With one worker the calling thread does all the work, so only those runs
-    // report counters.
+    // report hardware counters.
     PerfCounters counters;
     counters.start();
     for (auto _ : state) {
-        cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, dim, dim, dim,
-                    1.0, A.data.data(), dim, B.data.data(), dim, 0.0, C.data.data(), dim);
+        {
+            // The same job as the matmul.hpp calls: a new zeroed result, the product written
+            // into it, and the previous result freed.
+            bench::IterationTimer timer(state);
+            Matrix product(n, n);
+            cblas_dgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, dim, dim, dim,
+                        1.0, A.data.data(), dim, B.data.data(), dim, 0.0, product.data.data(), dim);
+            C = std::move(product);
+        }
         benchmark::DoNotOptimize(C);
     }
     counters.stop();
-    bench::finish(state, A, B, C, workers == 1 ? &counters : nullptr, workers == 1);
+    bench::finish(state, A, B, C, counters, workers == 1, workers == 1);
 
     // OpenMP's idle threads spin for a while before sleeping. Wait them out, untimed, so they do
     // not take cores from the next benchmark.
@@ -59,13 +68,14 @@ void aoclArgs(benchmark::internal::Benchmark* b) {
 BENCHMARK(BM_AOCL)
     ->Apply(aoclArgs)
     ->ArgNames({"n", "workers"})
-    ->UseRealTime()
+    ->UseManualTime()
     ->MeasureProcessCPUTime()
     ->Unit(benchmark::kMillisecond);
 
 }  // namespace
 
 int main(int argc, char** argv) {
+    bench::recycleFreedMemory();
     benchmark::Initialize(&argc, argv);
     if (benchmark::ReportUnrecognizedArguments(argc, argv)) return 1;
     bench::addContext();

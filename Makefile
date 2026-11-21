@@ -78,6 +78,10 @@ LABEL ?= $(shell git describe --always --dirty 2>/dev/null || echo unversioned)
 RESULTS_DIR = $(BENCH_DIR)/results
 PLOTS_DIR = $(BENCH_DIR)/plots
 BENCH_REPS ?= 5
+# TILE overrides the default tile edge (kBlockSize in bench/bench_common.hpp) for one run,
+# without a rebuild:  make bench-run TILE=192
+TILE ?=
+BENCH_ENV = $(if $(TILE),BENCH_TILE=$(TILE))
 BENCH_FLAGS = --benchmark_counters_tabular=true --benchmark_context=git=$(LABEL)
 COMPARE_PY ?= /usr/share/benchmark/compare.py
 
@@ -161,13 +165,13 @@ bench: $(BENCH_TARGET)
 # and CV per benchmark; the JSON file keeps every repetition.
 bench-run: $(BENCH_TARGET)
 	@mkdir -p $(RESULTS_DIR)
-	./$(BENCH_TARGET) $(BENCH_FLAGS) --benchmark_repetitions=$(BENCH_REPS) \
+	$(BENCH_ENV) ./$(BENCH_TARGET) $(BENCH_FLAGS) --benchmark_repetitions=$(BENCH_REPS) \
 		--benchmark_enable_random_interleaving=true --benchmark_display_aggregates_only=true \
 		--benchmark_out=$(RESULTS_DIR)/$(LABEL).json --benchmark_out_format=json $(ARGS)
 
 # Quick check: one repetition, without the two largest sizes. Nothing is saved.
 bench-quick: $(BENCH_TARGET)
-	./$(BENCH_TARGET) $(BENCH_FLAGS) '--benchmark_filter=-n:(3000|4000)/' $(ARGS)
+	$(BENCH_ENV) ./$(BENCH_TARGET) $(BENCH_FLAGS) '--benchmark_filter=-n:(3000|4000)/' $(ARGS)
 
 # Build the AOCL-BLAS reference suite (needs AOCL-BLAS in AOCL_DIR)
 bench-aocl: $(AOCL_TARGET)
@@ -175,7 +179,7 @@ bench-aocl: $(AOCL_TARGET)
 # AOCL-BLAS run, interleaved like bench-run, saved to bench/results/<LABEL>-aocl.json
 bench-aocl-run: $(AOCL_TARGET)
 	@mkdir -p $(RESULTS_DIR)
-	./$(AOCL_TARGET) $(BENCH_FLAGS) --benchmark_repetitions=$(BENCH_REPS) \
+	$(BENCH_ENV) ./$(AOCL_TARGET) $(BENCH_FLAGS) --benchmark_repetitions=$(BENCH_REPS) \
 		--benchmark_enable_random_interleaving=true --benchmark_display_aggregates_only=true \
 		--benchmark_out=$(RESULTS_DIR)/$(LABEL)-aocl.json --benchmark_out_format=json $(ARGS)
 

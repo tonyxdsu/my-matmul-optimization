@@ -3,6 +3,7 @@
 #include <cpuid.h>
 #include <linux/perf_event.h>
 #include <sys/ioctl.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -40,6 +41,13 @@ int openEvent(std::uint32_t type, std::uint64_t config) {
     return static_cast<int>(syscall(SYS_perf_event_open, &attr, 0, -1, -1, 0));
 }
 
+// Page faults of the whole process so far, minor (no disk read) plus major.
+long processPageFaults() {
+    rusage usage{};
+    getrusage(RUSAGE_SELF, &usage);
+    return usage.ru_minflt + usage.ru_majflt;
+}
+
 }  // namespace
 
 PerfCounters::PerfCounters() {
@@ -72,11 +80,13 @@ void PerfCounters::start() {
         ioctl(fd, PERF_EVENT_IOC_RESET, 0);
         ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
     }
+    faultsStart = processPageFaults();
     cpuStart = std::clock();
 }
 
 void PerfCounters::stop() {
     cpuElapsed = static_cast<double>(std::clock() - cpuStart) / CLOCKS_PER_SEC;
+    faultsElapsed = static_cast<double>(processPageFaults() - faultsStart);
     for (int i = 0; i < NumEvents; i++) {
         counts[i] = 0.0;
         if (fds[i] < 0) continue;
@@ -100,6 +110,10 @@ double PerfCounters::value(Event event) const {
 
 double PerfCounters::cpuSeconds() const {
     return cpuElapsed;
+}
+
+double PerfCounters::pageFaults() const {
+    return faultsElapsed;
 }
 
 std::string PerfCounters::describe() const {

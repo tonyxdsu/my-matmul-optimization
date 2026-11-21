@@ -14,6 +14,10 @@
  *
  * Events that the CPU, kernel or hypervisor does not provide are skipped. The L2, L3 and DRAM
  * events use AMD encodings and are opened only on AMD Zen 3 or newer.
+ *
+ * It also counts the process's page faults between start() and stop(). That count comes from the
+ * kernel's own bookkeeping, not from a hardware counter, so it covers every thread and is always
+ * available.
  */
 class PerfCounters {
 public:
@@ -73,6 +77,13 @@ public:
     double cpuSeconds() const;
 
     /**
+     * @return Page faults taken by the whole process between the last start() and stop(): pages
+     *         touched for the first time, which the kernel has to map in. Time spent on them is
+     *         kernel time, which the Cycles event does not count but cpuSeconds() does.
+     */
+    double pageFaults() const;
+
+    /**
      * @return The names of the open events, or why none could be opened. For logging.
      */
     std::string describe() const;
@@ -102,6 +113,16 @@ private:
      * Process CPU seconds between the last start() and stop().
      */
     double cpuElapsed = 0.0;
+
+    /**
+     * The process's page-fault count at the last start().
+     */
+    long faultsStart = 0;
+
+    /**
+     * Page faults between the last start() and stop().
+     */
+    double faultsElapsed = 0.0;
 };
 
 #endif

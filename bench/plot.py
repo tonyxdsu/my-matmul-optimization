@@ -35,7 +35,10 @@ THEME = {
 }
 
 TIME_UNITS = {"ns": 1e-9, "us": 1e-6, "ms": 1e-3, "s": 1.0}
-COUNTERS = ("IPC", "GHz", "FLOP/cycle", "L1D_miss/FMA", "L2_miss/FMA", "L3_fill/FMA", "DRAM_fill/FMA")
+COUNTERS = ("IPC", "GHz", "FLOP/cycle", "L1D_miss/FMA", "L2_miss/FMA", "L3_fill/FMA", "DRAM_fill/FMA",
+            "faults/call")
+# A default tile this far below the best tile of the sweep gets a warning.
+STALE_TILE = 0.05
 BASELINE_DASH = (0, (3, 2))   # line style of the --baseline version
 
 
@@ -82,6 +85,8 @@ class Results:
                  "reps": len(runs), "cv": None}
         if len(seconds) > 1:
             point["cv"] = statistics.stdev(seconds) / statistics.fmean(seconds)
+        if all("cpu_time" in run and run["real_time"] > 0 for run in runs):
+            point["cpu_per_wall"] = statistics.median(run["cpu_time"] / run["real_time"] for run in runs)
         for counter in COUNTERS:
             values = [run[counter] for run in runs if counter in run]
             if values:
@@ -117,6 +122,56 @@ class Results:
 
     def repetitions(self):
         return max((p["reps"] for p in self.points.values()), default=0)
+
+    def raw_clock(self):
+        """True if the run was timed on CLOCK_MONOTONIC_RAW. Earlier runs used the wall clock that
+        the system adjusts, which under WSL2 has run several percent fast or slow."""
+        return self.context.get("wall_clock") == "CLOCK_MONOTONIC_RAW"
+
+    def cpu_per_wall(self):
+        """Median CPU time / wall time over the one-thread benchmarks, or None. One thread cannot
+        use more than one second of CPU per second, and here it is rarely kept off the CPU, so a
+        value away from 1.00 mostly measures how fast the wall clock ran."""
+        ratios = [point["cpu_per_wall"] for (family, args), point in self.points.items()
+                  if "cpu_per_wall" in point and (family in ("BM_Naive", "BM_Blocked") or dict(args).get("workers") == 1)]
+        return statistics.median(ratios) if ratios else None
+
+    def clock_note(self):
+        """How the run was timed, for the summary."""
+        ratio = self.cpu_per_wall()
+        if ratio is None:
+            return "wall-clock time"
+        if self.raw_clock():
+            return f"wall-clock time on the raw clock (CPU / wall on one thread: {ratio:.2f})"
+        note = f"wall-clock time on the adjusted system clock (CPU / wall on one thread: {ratio:.2f}"
+        if abs(ratio - 1) >= 0.01:
+            note += f", so its GFLOP/s read about {abs(1 - ratio):.0%} {'low' if ratio < 1 else 'high'}"
+        return note + ")"
+
+    def best_tiles(self):
+        """[(description, best tile, its GFLOP/s, GFLOP/s at the default tile)] from the tile sweep,
+        for one thread and for the parallel sweep's worker count."""
+        n, out = self.fixed_n, []
+        workers = self.tile_sweep_workers()
+        sweeps = [("1 thread", self.series("BM_Blocked", "bs", n=n))]
+        if workers:
+            sweeps.append((f"{workers} workers", self.series("BM_BlockedParallel", "bs", n=n, workers=workers)))
+        for what, sweep in sweeps:
+            default = dict(sweep).get(self.block_size)
+            if len(sweep) < 2 or not default:
+                continue
+            tile, point = min(sweep, key=lambda item: item[1]["seconds"])
+            out.append((what, tile, gflops(n, point), gflops(n, default)))
+        return out
+
+    def stale_tile(self):
+        """The best_tiles() entries that beat the default tile by more than STALE_TILE."""
+        return [entry for entry in self.best_tiles() if entry[2] > entry[3] * (1 + STALE_TILE)]
+
+    def faulting(self):
+        """Names of benchmarks whose timed loop took page faults (median of 1 or more per call)."""
+        return sorted(f"{family}/" + "/".join(f"{k}:{v}" for k, v in args)
+                      for (family, args), point in self.points.items() if point.get("faults/call", 0) >= 1)
 
 
 def gflops(n, point, time="seconds"):
@@ -573,10 +628,16 @@ def summary(results, label, charts, image_dir="", level=1, base=None):
     if "openblas" in ctx and any(family == "BM_OpenBLAS" for family, _ in results.points):
         out.append(f"- Reference: {ctx['openblas']}")
     out.append(f"- Run: {ctx.get('date', '')}, median of {results.repetitions()} repetitions, "
-               f"wall-clock time, every result checked with Freivalds' algorithm")
+               f"{results.clock_note()}, every result checked with Freivalds' algorithm")
     if base:
-        out.append(f"- Baseline: {base.label}, run {base.context.get('date', '')}. The charts draw its blocked "
-                   f"kernels as hollow markers and dashed lines; \"vs {base.label}\" columns are speedups over it.")
+        out.append(f"- Baseline: {base.label}, run {base.context.get('date', '')}, {base.clock_note()}. The charts "
+                   f"draw its blocked kernels as hollow markers and dashed lines; \"vs {base.label}\" columns are "
+                   f"speedups over it in time, so they carry any difference between the two clocks. FLOP/cycle "
+                   f"does not.")
+    faulting = results.faulting()
+    if faulting:
+        out.append(f"- Page faults inside the timed loop (they cost kernel time and lower GHz): "
+                   f"{', '.join(faulting[:6])}{' and more' if len(faulting) > 6 else ''}")
     if results.failed:
         out += ["", "**Failed correctness check:**", ""] + [f"- {f}" for f in results.failed]
     base_name = base.label if base else "baseline"   # column headers; the columns are dropped without one
@@ -658,6 +719,15 @@ def summary(results, label, charts, image_dir="", level=1, base=None):
     if rows:
         out += ["", f"{h2} Tile sweep: n = {n}", ""]
         out += images(charts, image_dir, ("tile_sweep", f"GFLOP/s by tile size at n = {n}"))
+        best = results.best_tiles()
+        if best:
+            out += ["Best tile: " + "; ".join(
+                f"{what} {tile} ({fast:.3g} GFLOP/s, {fast / at_default - 1:+.0%} against tile {bs})"
+                for what, tile, fast, at_default in best) + ".", ""]
+        if results.stale_tile():
+            out += [f"**Tile {bs} has fallen behind.** The headline, size and thread-scaling tables above use "
+                    f"it. Rerun with `make bench-run TILE=<tile>`, or change `kBlockSize` in "
+                    f"`bench/bench_common.hpp`.", ""]
         out.append(table(["Tile", "1 thread GFLOP/s", f"vs {base_name}", "IPC", "L1D miss/FMA", "L2 miss/FMA",
                           f"{workers} workers GFLOP/s", f"vs {base_name}"], rows))
     return "\n".join(out) + "\n"
@@ -716,6 +786,9 @@ def main():
         update_readme(args.readme, results, label, written, out, base)
     for failure in results.failed:
         print(f"FAILED correctness check: {failure}")
+    for what, tile, fast, at_default in results.stale_tile():
+        print(f"WARNING: tile {results.block_size} has fallen behind, {what}: tile {tile} does {fast:.3g} GFLOP/s "
+              f"against {at_default:.3g}. Rerun with make bench-run TILE={tile} or change kBlockSize.")
 
 
 if __name__ == "__main__":
