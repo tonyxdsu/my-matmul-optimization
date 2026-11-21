@@ -19,6 +19,7 @@ bin/
 *.md
 !README.md
 !bench/plots/summary.md
+!exercises/**/ASSIGNMENT.md
 
 # Python bytecode cache
 __pycache__/
