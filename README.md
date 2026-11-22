@@ -79,7 +79,7 @@ v0:  for i, for j:   sum = 0;  for k: sum += A[i][k] * B[k][j];  C[i][j] += sum
 v1:  for i, for k:   for j: C[i][j] += A[i][k] * B[k][j]
 ```
 
-![v0 and v1 stepping through the same 4 x 8 tile: v0 makes 128 passes of its inner loop, one multiply-add each, while v1 makes 16 passes of 8](docs/v1/same_work.gif)
+![v0 and v1 stepping through the same 4 x 32 tile: v0 makes 512 passes of its inner loop, one multiply-add each, while v1's j loop crosses each row in 4 passes of 8, 64 passes in all](docs/v1/same_work_wide.gif)
 
 **Result.** 1.49 to 2.58 FLOP/cycle (1.73x) on one thread, and 59.9 to 99.4 GFLOP/s on 16 workers.
 
