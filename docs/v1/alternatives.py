@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Draws two alternative GIFs for the v1 section of README.md. Both show v0 and v1 in one picture,
+"""Draws alternative GIFs for the v1 section of README.md. Each shows v0 and v1 in one picture,
 on one clock, with a row of 8 doubles: what one zmm register holds on this CPU.
 
-    python3 docs/v1/alternatives.py      # writes same_work.gif and lanes.gif next to this file
+    python3 docs/v1/alternatives.py                   # writes every GIF next to this file
+    python3 docs/v1/alternatives.py same_work_wide    # writes only the ones named
 
-same_work.gif  The loop nests of v0 and v1 stepping through the same 4 x 8 tile. A frame is one
-               pass of v0's inner loop; v1 makes one pass for every 8 of v0's.
-lanes.gif      Inside the inner loop, one instruction per frame: v0 moves one double through
-               registers that could hold 8, v1 fills all 8 lanes.
+same_work.gif       The loop nests of v0 and v1 stepping through the same 4 x 8 tile. A frame is
+                    one pass of v0's inner loop; v1 makes one pass for every 8 of v0's.
+same_work_wide.gif  The same on a 4 x 32 tile, so v1's j loop has to loop too: 4 passes of 8
+                    doubles to cross one row of C.
+lanes.gif           Inside the inner loop, one instruction per frame: v0 moves one double through
+                    registers that could hold 8, v1 fills all 8 lanes.
 
 The look (palette, frame capture, GIF writer) is docs/guide/gifkit.py, the same as traversal.py.
 """
@@ -33,17 +36,20 @@ def shade(done):
 
 
 class Cells:
-    """A grid of cells that is repainted every frame. label_size adds a text to each cell."""
+    """A grid of cells that is repainted every frame. label_size adds a text to each cell. group
+    and gap leave a space of `gap` after every `group` columns."""
 
-    def __init__(self, cv, x0, top, rows, cols, cell, label_size=None):
+    def __init__(self, cv, x0, top, rows, cols, cell, label_size=None, group=None, gap=0.0):
         self.rects, self.texts = {}, {}
         for r in range(rows):
             for c in range(cols):
-                self.rects[r, c] = cv.rect(x0 + c * cell, top - (r + 1) * cell, cell, cell)
+                x = x0 + c * cell + (c // group * gap if group else 0)
+                self.rects[r, c] = cv.rect(x, top - (r + 1) * cell, cell, cell)
                 if label_size:
-                    self.texts[r, c] = cv.text(x0 + (c + 0.5) * cell, top - (r + 0.5) * cell, "",
+                    self.texts[r, c] = cv.text(x + 0.5 * cell, top - (r + 0.5) * cell, "",
                                                size=label_size, color="muted")
-        self.x0, self.top, self.width, self.height = x0, top, cols * cell, rows * cell
+        self.x0, self.top, self.height = x0, top, rows * cell
+        self.width = cols * cell + ((cols - 1) // group * gap if group else 0)
 
     def paint(self, faces=None, outline=(), labels=None, dim=()):
         """faces maps a cell to its fill; outlined cells get a white edge; labels maps a cell to
@@ -151,6 +157,94 @@ def same_work():
     cv.save("same_work")
 
 
+def same_work_wide():
+    """v0 and v1 on the same 4 x 32 tile: wide enough that v1's j loop makes 4 passes per row."""
+    width = 32                                      # extent of j
+    groups = width // LANES                         # passes of v1's j loop to cross one row
+    total = ROWS * width * DEPTH
+    cv = Canvas(8.0, 6.75, "The same tile, two loop orders",
+                f"Both do the same {total} multiply-adds on a {ROWS} x {width} tile of C. v0's inner loop does one "
+                f"per pass. v1's does {LANES},\none 512-bit instruction, so its j loop crosses a row in {groups} "
+                f"passes: {ROWS * DEPTH * groups} passes where v0 needs {total}.")
+    cell, gap = 0.13, 0.05                          # the gap sets off each run of 8 columns
+    xs = {"code": 0.25, "A": 2.62, "B": 3.42}
+    a_mid = xs["A"] + DEPTH * cell / 2
+    op_x = (xs["A"] + DEPTH * cell + xs["B"]) / 2   # where the × and → sit, between A and B
+    read_bar, write_bar = COLORS["trail"], blend(COLORS["surface"], COLORS["write"], 0.5)
+
+    def band(top, name, lines, notes, with_sum):
+        cv.text(0.25, top, name, size=10.5, color="ink", ha="left", fontweight="bold")
+        stat = cv.text(7.75, top, "", size=8.5, color="ink2", ha="right")
+        b_top = top - 0.62
+        c_top = b_top - ROWS * cell - 0.42
+        c_mid = c_top - ROWS * cell / 2
+        code = Code(cv, xs["code"], b_top - 0.05, lines, 0.95)
+        grids = {"A": Cells(cv, xs["A"], b_top, ROWS, DEPTH, cell)}
+        cv.text(a_mid, b_top + 0.14, "A", size=10, color="ink", fontweight="bold")
+        for key, grid_top in (("B", b_top), ("C", c_top)):
+            grids[key] = Cells(cv, xs["B"], grid_top, ROWS, width, cell, group=LANES, gap=gap)
+            cv.text(xs["B"], grid_top + 0.14, key, size=10, color="ink", ha="left", fontweight="bold")
+            cv.text(xs["B"] + 0.22, grid_top + 0.135, notes[key], size=7.3, color="muted", ha="left")
+        cv.text(op_x, b_top - ROWS * cell / 2, "×", size=13, color="muted")
+        cv.text(op_x, c_mid, "→", size=13, color="muted")
+        total_box = None
+        if with_sum:
+            box = 0.21
+            total_box = Cells(cv, a_mid - box / 2, c_mid + box / 2, 1, 1, box)
+            cv.text(a_mid, c_mid + box / 2 + 0.11, "sum", size=7.3, color="muted")
+        ticks = [cv.text(xs["B"] + g * (LANES * cell + gap) + LANES * cell / 2, c_top - ROWS * cell - 0.13,
+                         f"j = {g * LANES}..{(g + 1) * LANES - 1}", size=7.3, color="muted") for g in range(groups)]
+        return stat, code, grids, total_box, ticks
+
+    v0_stat, v0_code, v0_grids, v0_sum, v0_ticks = band(
+        5.55, "v0: i-j-k",
+        ["for i", "  for j", "    for k", "      sum += A[i][k] * B[k][j]", "    C[i][j] += sum"],
+        {"B": "down a column: each read is a row away", "C": "one element, after 4 passes"}, True)
+    cv.ax.plot([0.25, 7.75], [3.12, 3.12], color=COLORS["edge"], linewidth=1)
+    v1_stat, v1_code, v1_grids, _, v1_ticks = band(
+        2.85, "v1: i-k-j",
+        ["for i", "  for k", "    for j", "      C[i][j] += A[i][k] * B[k][j]"],
+        {"B": "along a row: 8 adjacent doubles per pass", "C": "8 elements per pass, a whole row in 4"}, False)
+
+    def mark(ticks, active):
+        for g, tick in enumerate(ticks):
+            tick.set_color(COLORS["ink"] if g == active else COLORS["muted"])
+
+    for frame in range(total):
+        # v0: pass number `frame` of the i-j-k nest.
+        i, j, k = frame // (width * DEPTH), frame // DEPTH % width, frame % DEPTH
+        last = k == DEPTH - 1
+        v0_code.show({3: read_bar, **({4: write_bar} if last else {})}, {0: f"i = {i}", 1: f"j = {j}", 2: f"k = {k}"})
+        v0_grids["A"].paint({**{(i, c): COLORS["trail"] for c in range(DEPTH)}, (i, k): COLORS["read"]})
+        v0_grids["B"].paint({**{(r, j): COLORS["trail"] for r in range(DEPTH)}, (k, j): COLORS["read"]})
+        finished = i * width + j + (1 if last else 0)
+        v0_grids["C"].paint({(n // width, n % width): shade(1) for n in range(finished)}, outline={(i, j)})
+        v0_sum.paint({(0, 0): shade((k + 1) / DEPTH)})
+        v0_stat.set_text(f"{frame + 1} passes, {frame + 1} multiply-adds")
+        mark(v0_ticks, j // LANES)
+
+        # v1: one pass of the i-k-j nest for every LANES frames; g counts the passes of its j loop.
+        step = frame // LANES
+        i, k, g = step // (DEPTH * groups), step // groups % DEPTH, step % groups
+        lo = g * LANES
+        v1_code.show({3: read_bar}, {0: f"i = {i}", 1: f"k = {k}", 2: f"j = {lo}..{lo + LANES - 1}"})
+        v1_grids["A"].paint({**{(i, c): COLORS["trail"] for c in range(DEPTH)}, (i, k): COLORS["read"]})
+        v1_grids["B"].paint({**{(k, c): COLORS["trail"] for c in range(width)},
+                             **{(k, c): COLORS["read"] for c in range(lo, lo + LANES)}})
+        faces = {(r, c): shade(1) for r in range(i) for c in range(width)}
+        for c in range(width):
+            updates = k + (1 if c < lo + LANES else 0)      # multiply-adds this element of row i has had
+            if updates:
+                faces[i, c] = shade(updates / DEPTH)
+        v1_grids["C"].paint(faces, outline={(i, c) for c in range(lo, lo + LANES)})
+        v1_stat.set_text(f"{step + 1} passes, {(step + 1) * LANES} multiply-adds")
+        mark(v1_ticks, g)
+
+        cv.snap("one frame = one pass of v0's inner loop", f"{frame + 1} of {total}",
+                2500 if frame == total - 1 else 60)
+    cv.save("same_work_wide")
+
+
 def lanes():
     """Inside the inner loop, one instruction per frame, with the registers drawn as 8 lanes."""
     cv = Canvas(8.0, 5.7, "Inside the inner loop: one lane, or all eight",
@@ -240,5 +334,6 @@ def lanes():
 
 
 if __name__ == "__main__":
-    same_work()
-    lanes()
+    drawings = {f.__name__: f for f in (same_work, same_work_wide, lanes)}
+    for name in sys.argv[1:] or drawings:
+        drawings[name]()
