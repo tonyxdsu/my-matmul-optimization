@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace {
@@ -746,4 +747,143 @@ TEST(MultiplyBlockedParallelTest, PoolStillUsableAfterThrow) {
 
     Matrix A = randomMatrix(6, 4, 94);
     expectMatricesNear(multiplyBlockedParallel(A, B, 2, pool), referenceMultiply(A, B));
+}
+
+// ---------------------------------------------------------------------------
+// Register-block edges (v4)
+//
+// A register-blocked kernel updates C in blocks of R rows by 8 * V columns and needs
+// separate code for the rows and columns left over. The suites above stop at 23
+// columns, which is less than one block for most shapes, so they can pass without the
+// block path (or without the fringe path) ever running. These tests cover every row
+// count from 1 to 29 and every column count from 1 to 130. For any block that fits in
+// 32 zmm registers (R up to 14, V up to 8) that includes: less than one block, exactly
+// one block, one block plus each possible fringe width, and two blocks plus a fringe.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Returns "" when actual matches expected within kTol, otherwise a description of the
+// first element that differs. One message per matrix keeps a failing sweep readable;
+// expectMatricesNear would print every wrong element of every shape.
+std::string firstMismatch(const Matrix& actual, const Matrix& expected) {
+    if (actual.rows != expected.rows || actual.cols != expected.cols)
+        return "result is " + std::to_string(actual.rows) + " x " + std::to_string(actual.cols);
+    for (std::size_t r = 0; r < actual.rows; r++)
+        for (std::size_t c = 0; c < actual.cols; c++)
+            // Written as !(<=) so that a NaN counts as a mismatch.
+            if (!(std::abs(actual.at(r, c) - expected.at(r, c)) <= kTol))
+                return "first wrong element is (" + std::to_string(r) + ", " + std::to_string(c) +
+                       "): got " + std::to_string(actual.at(r, c)) +
+                       ", want " + std::to_string(expected.at(r, c));
+    return "";
+}
+
+}  // namespace
+
+TEST(RegisterBlockEdgesTest, BlockedMatchesReferenceForEveryRowAndColumnCount) {
+    // K = 1 is a k run of a single step; 9 and 20 leave a tail against blockSize 16.
+    constexpr std::size_t innerDims[] = {1, 9, 20};
+    // 16: tiles smaller than most blocks. 48: several tiles, the last one partial.
+    // 256: the whole matrix is one tile.
+    constexpr std::size_t blockSizes[] = {16, 48, 256};
+
+    for (std::size_t k : innerDims)
+        for (std::size_t m = 1; m <= 29; m++)
+            for (std::size_t n = 1; n <= 130; n++) {
+                unsigned int seed = static_cast<unsigned int>(1000 + 131 * m + n);
+                Matrix A = randomMatrix(m, k, seed);
+                Matrix B = randomMatrix(k, n, seed + 50000);
+                Matrix want = referenceMultiply(A, B);
+                for (std::size_t bs : blockSizes)
+                    // ASSERT, not EXPECT: stop at the first failing shape, which is
+                    // the smallest one and the easiest to debug.
+                    ASSERT_EQ(firstMismatch(multiplyBlocked(A, B, bs), want), "")
+                        << "C is " << m << " x " << n << ", K = " << k << ", blockSize = " << bs;
+            }
+}
+
+TEST(RegisterBlockEdgesTest, TileAtAnyOffsetWritesOnlyItself) {
+    // multiplyBlock on tiles that start and end anywhere, including at columns that
+    // are not multiples of 8. Elements inside the tile must hold sentinel + product;
+    // every element outside must still be the sentinel. This is the test that catches
+    // a fringe written with a full-width vector store, which gives the right values
+    // inside the tile and overwrites its neighbours.
+    const std::size_t M = 34, K = 11, N = 140;
+    Matrix A = randomMatrix(M, K, 201);
+    Matrix B = randomMatrix(K, N, 202);
+    const Matrix product = referenceMultiply(A, B);
+    const double sentinel = -12345.0;
+
+    constexpr std::size_t rowStarts[] = {0, 1, 5};
+    constexpr std::size_t rowCounts[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 12, 13, 16, 17, 28, 29};
+    constexpr std::size_t colStarts[] = {0, 1, 8, 13};
+    constexpr std::size_t colCounts[] = {1,  2,  7,  8,  9,  15, 16, 17, 23, 24, 25,
+                                         31, 32, 33, 47, 48, 49, 63, 64, 65, 127};
+    constexpr std::size_t blockSizes[] = {4, 64};   // K = 11: three k runs, or one
+
+    Matrix C(M, N);
+    for (std::size_t bs : blockSizes)
+        for (std::size_t r0 : rowStarts)
+            for (std::size_t rc : rowCounts)
+                for (std::size_t c0 : colStarts)
+                    for (std::size_t cc : colCounts) {
+                        const std::size_t r1 = r0 + rc, c1 = c0 + cc;
+                        ASSERT_LE(r1, M);
+                        ASSERT_LE(c1, N);
+                        for (double& x : C.data) x = sentinel;
+
+                        multiplyBlock(A, B, C, r0, r1, c0, c1, bs);
+
+                        for (std::size_t r = 0; r < M; r++)
+                            for (std::size_t c = 0; c < N; c++) {
+                                const bool inTile = r >= r0 && r < r1 && c >= c0 && c < c1;
+                                const double want = inTile ? sentinel + product.at(r, c) : sentinel;
+                                const bool ok = inTile ? std::abs(C.at(r, c) - want) <= kTol
+                                                       : C.at(r, c) == sentinel;
+                                ASSERT_TRUE(ok)
+                                    << (inTile ? "wrong value inside the tile" : "wrote outside the tile")
+                                    << " at (" << r << ", " << c << "): got " << C.at(r, c)
+                                    << ", want " << want << ". Tile is rows [" << r0 << ", " << r1
+                                    << ") x cols [" << c0 << ", " << c1 << "), blockSize = " << bs;
+                            }
+                    }
+}
+
+TEST(RegisterBlockEdgesTest, ParallelMatchesReferenceWithFringeTiles) {
+    // The parallel version cuts C into blockSize tiles, so its last tile in each
+    // direction has its own row and column fringes.
+    struct Shape { std::size_t m, k, n; };
+    constexpr Shape shapes[] = {{1, 1, 1},   {29, 7, 3},   {5, 40, 100}, {37, 29, 67},
+                                {48, 48, 48}, {65, 17, 65}, {50, 33, 130}};
+    constexpr std::size_t blockSizes[] = {16, 48, 64};
+
+    Threadpool pool(4);
+    unsigned int seed = 300;
+    for (const Shape& s : shapes) {
+        Matrix A = randomMatrix(s.m, s.k, seed++);
+        Matrix B = randomMatrix(s.k, s.n, seed++);
+        Matrix want = referenceMultiply(A, B);
+        for (std::size_t bs : blockSizes)
+            ASSERT_EQ(firstMismatch(multiplyBlockedParallel(A, B, bs, pool), want), "")
+                << "C is " << s.m << " x " << s.n << ", K = " << s.k << ", blockSize = " << bs;
+    }
+}
+
+TEST(RegisterBlockEdgesTest, MediumSizesMixFullBlocksAndFringes) {
+    // Large enough that most elements go through full register blocks for any block
+    // shape, with fringes at both the tile edges and the matrix edges.
+    struct Shape { std::size_t m, k, n; };
+    constexpr Shape shapes[] = {{128, 64, 128}, {150, 90, 190}, {131, 70, 257}};
+    constexpr std::size_t blockSizes[] = {48, 64, 100};
+
+    unsigned int seed = 400;
+    for (const Shape& s : shapes) {
+        Matrix A = randomMatrix(s.m, s.k, seed++);
+        Matrix B = randomMatrix(s.k, s.n, seed++);
+        Matrix want = referenceMultiply(A, B);
+        for (std::size_t bs : blockSizes)
+            ASSERT_EQ(firstMismatch(multiplyBlocked(A, B, bs), want), "")
+                << "C is " << s.m << " x " << s.n << ", K = " << s.k << ", blockSize = " << bs;
+    }
 }
