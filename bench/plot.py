@@ -559,7 +559,9 @@ def chart_headline(results, theme, base=None):
     ax.set_xscale("log")
     ticks = [t for t in (1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000) if lowest / 2 <= t <= highest * 2]
     fixed_ticks(ax.xaxis, ticks, lambda v: f"{v:g}")
-    ax.set_xlim(lowest / 1.6, highest * (3.2 if olds else 2.2))   # room for the "vs" labels
+    # Room on the right for the "vs" labels, which grow with the baseline's name.
+    room = 3.2 * 1.12 ** max(0, len(base.label) - 2) if olds else 2.2
+    ax.set_xlim(lowest / 1.6, highest * room)
     ax.set_yticks(ys)
     ax.set_yticklabels(labels)
     ax.tick_params(axis="y", length=0, labelsize=9)

@@ -52,6 +52,31 @@ std::int64_t blockSize();
 constexpr std::int64_t kTileSizes[] = {8, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512};
 
 /**
+ * The three functions below let one run use other sizes without a rebuild, for a kernel that
+ * only handles some shapes (`make bench-run SIZES=96,192,480 FIXED_N=2016 TILES=96,192,384`).
+ * Each list is comma-separated positive integers. The sizes that ran are in the results file as
+ * the benchmarks' own arguments.
+ */
+
+/**
+ * @return Matrix sizes for the size sweep: the BENCH_SIZES environment variable if it holds a
+ *         list, otherwise kSizes.
+ */
+const std::vector<std::int64_t>& sizes();
+
+/**
+ * @return Matrix size for the thread-scaling benchmark and the tile sweep: the BENCH_FIXED_N
+ *         environment variable if it holds a positive integer, otherwise kFixedN.
+ */
+std::int64_t fixedN();
+
+/**
+ * @return Tile edges for the tile sweep: the BENCH_TILES environment variable if it holds a list,
+ *         otherwise kTileSizes.
+ */
+const std::vector<std::int64_t>& tileSizes();
+
+/**
  * Worker count for the parallel tile sweep: one per physical core of the 9800X3D.
  */
 constexpr std::int64_t kTileSweepWorkers = 8;

@@ -9,13 +9,14 @@ triple loop toward BLAS speed, one measured change per version.
 ![GCC 13.3](https://img.shields.io/badge/GCC-13.3-555555?style=flat-square&logo=gnu&logoColor=white)
 ![AVX-512](https://img.shields.io/badge/SIMD-AVX--512-3987e5?style=flat-square)
 ![Zen 5](https://img.shields.io/badge/CPU-Zen%205-d95926?style=flat-square&logo=amd&logoColor=white)
-![Progress](https://img.shields.io/badge/progress-v3%20of%20v4-2ea043?style=flat-square)
+![Progress](https://img.shields.io/badge/progress-v4%20in%20progress-2ea043?style=flat-square)
 
 [At a glance](#versions-at-a-glance) ·
 [v0](#v0-cache-blocking) ·
 [v1](#v1-loop-interchange) ·
 [v2](#v2-cache-line-aligned-storage) ·
 [v3](#v3-hoist-loop-invariants) ·
+[v4*](#v4-register-blocking-in-progress) ·
 [Thread pool](#the-thread-pool) ·
 [Results](#results) ·
 [Run it](#run-it) ·
@@ -23,10 +24,16 @@ triple loop toward BLAS speed, one measured change per version.
 
 </div>
 
-![FLOP per cycle of each version on one thread: naive 0.80, v0 1.49, v1 2.58, v2 4.31, v3 6.10, OpenBLAS 26.0, against a limit of 32](docs/progress.png)
+![FLOP per cycle of each version on one thread: naive 0.80, v0 1.49, v1 2.58, v2 4.31, v3 6.10, v4* 29.1, OpenBLAS 26.0, against a limit of 32. v4* is in progress and is measured at n = 2016, tile 192, where OpenBLAS runs at 25.8](docs/progress.png)
 
-So far the kernel is about **7.5x** faster than the naive loop on one thread and **58x** faster on
-the pool's 16 workers. It runs at about a quarter of OpenBLAS's speed, so there is a long way to go.
+v3, the last finished version, is about **7.5x** faster than the naive loop on one thread and
+**58x** faster on the pool's 16 workers, at about a quarter of OpenBLAS's speed.
+
+**v4\*** is in progress. Its kernel so far handles only matrices made of whole register blocks. On
+those it runs at **28.5 to 29.9 FLOP/cycle** on one thread, 3.9x v3's kernel at n = 2016. From
+n = 192 to 4032 it is 6 to 33% faster than single-threaded OpenBLAS.
+[What the asterisk covers](#v4-register-blocking-in-progress) is spelled out below.
+
 Every number comes from [Google Benchmark](https://github.com/google/benchmark) with hardware
 performance counters, on a Ryzen 7 9800X3D.
 
@@ -42,8 +49,11 @@ limit is 32.
 | [v1](#v1-loop-interchange) | Loop order i-k-j, which lets GCC vectorize with AVX-512 | 2.58 | 1.73x | 1.95 | 2.52 |
 | [v2](#v2-cache-line-aligned-storage) | Matrices start on a 64-byte cache line | 4.31 | 1.67x | 1.70 | 3.67 |
 | [v3](#v3-hoist-loop-invariants) | Loop invariants computed once, outside the loops | 6.10 | 1.42x | 1.33 | 4.05 |
-| [v4](#v4-register-blocking-planned) | Register blocking | *planned* | | | |
+| [v4\*](#v4-register-blocking-in-progress) | A 6 x 32 block of C stays in registers for a whole k block | 29.1\* | 3.89x\* | 0.20 | 2.91 |
 | OpenBLAS | Reference: hand-written AVX-512 kernels | 26.0 | | 0.23 | 2.94 |
+
+\* v4 is in progress and handles whole register blocks only, which n = 2000 and tile 48 are not.
+Its row is n = 2016, tile 192, where v3's kernel runs at 7.48 FLOP/cycle and OpenBLAS at 25.8.
 
 Each section below has the same parts: what changed, what it bought, why, and the bottleneck it
 left for the next version.
@@ -217,12 +227,97 @@ boundary.
 > **Next bottleneck.** C still makes a round trip through memory for every k: two loads and a
 > store per vector FMA. v3 reaches 6.10 of a possible 32 FLOP/cycle.
 
-## v4: register blocking (planned)
+## v4: register blocking (in progress)
 
-The plan is to keep a small block of C in registers for a whole k block, so the inner loop stops
-loading and storing C. The warm-up is in
-[exercises/register_blocking](exercises/register_blocking): toy problems on intrinsics,
-dependency chains, register blocks and edges.
+`multiplyBlock` is now written with AVX-512 intrinsics. It keeps a 6 x 32 block of C in 24 `zmm`
+registers for a whole k block: loaded once, updated by 24 FMAs for each k, and stored once.
+
+```
+v3:  for i, for k:
+         for j, 8 at a time:   C[i][j] += A[i][k] * B[k][j]        C is loaded and stored for every FMA
+
+v4:  for i, 6 at a time:   for j, 32 at a time:
+         load the 6 x 32 block of C into 24 registers
+         for k:   every register += its row's A[i][k] * its 8 columns of B[k]
+         store the 24 registers
+```
+
+**Result\*.** On matrices made of whole register blocks, 28.5 to 29.9 FLOP/cycle on one thread,
+3.8 to 4.0x v3's kernel from n = 288 up, and 864 GFLOP/s on 8 workers. One thread, tile 192:
+
+| n | v3, FLOP/cycle | v4\*, FLOP/cycle | OpenBLAS, FLOP/cycle | v4\* against OpenBLAS, by time |
+|---|---:|---:|---:|---:|
+| 96 | 8.90 | 29.51 | 30.02 | 0.99x |
+| 192 | 10.45 | 29.37 | 21.66 | 1.33x |
+| 480 | 7.71 | 29.91 | 24.36 | 1.21x |
+| 960 | 7.63 | 29.85 | 24.99 | 1.17x |
+| 2016 | 7.48 | 29.11 | 25.75 | 1.09x |
+| 4032 | 7.50 | 28.50 | 26.22 | 1.06x |
+
+The lead over OpenBLAS is smaller by time than by FLOP/cycle (1.09x against 1.13x at n = 2016),
+because the counters read a clock about 3% lower during v4's runs: 4.79 against 4.92 GHz.
+
+**Why.**
+
+- **C stays out of memory.** v3 did two loads and a store for every vector FMA. One pass of v4's k
+  loop does 24 FMAs with 10 loads and no store: 6 values of A, one per row of the block, and 4
+  vectors of B, one per 8 columns.
+- **Fewer instructions.** That pass is 38 instructions for 192 multiply-adds, 0.20 each, against
+  v3's 1.33 at tile 48 and 0.90 at tile 192.
+- **Enough FMAs in flight.** The core can start 2 FMAs per cycle and each takes 4 cycles, so it
+  needs at least 8 that do not wait on each other. The 24 registers are 24 separate chains.
+- **It just fits.** 24 registers of C, 6 of A and 1 of B make 31 of the 32 `zmm` registers. The
+  compiled k loop never touches the stack.
+
+<details>
+<summary><b>The k loop, from <code>objdump</code></b></summary>
+
+One pass, for one k. `zmm0` is the vector of B, `zmm1` to `zmm6` are the 6 values of A, and the
+other 24 registers are the block of C:
+
+```
+vmovupd      zmm0,[rcx]              # B[k], columns j to j+7
+vbroadcastsd zmm6,[rsi+rax*8]        # column k of A in all 8 lanes, for one row of the block
+vbroadcastsd zmm5,[r13+rax*8]        # and for the other 5 rows
+vbroadcastsd zmm4,[r10+rax*8]
+vbroadcastsd zmm3,[r11+rax*8]
+vbroadcastsd zmm2,[rbx+rax*8]
+vbroadcastsd zmm1,[r12+rax*8]
+inc          rax                     # k++
+vfmadd231pd  zmm12,zmm6,zmm0         # 6 rows of C, columns j to j+7
+vfmadd231pd  zmm9,zmm5,zmm0
+vfmadd231pd  zmm23,zmm4,zmm0
+vfmadd231pd  zmm24,zmm3,zmm0
+vfmadd231pd  zmm18,zmm2,zmm0
+vfmadd231pd  zmm25,zmm1,zmm0
+vmovupd      zmm0,[rcx+0x40]         # B[k], columns j+8 to j+15
+...                                  # 6 more FMAs, and the same again for j+16 and j+24
+add          rcx,r9                  # B pointer += one row
+cmp          rdx,rax                 # end of the k block?
+jne          ...
+```
+
+</details>
+
+> [!WARNING]
+> **What the asterisk covers.**
+> - **Whole register blocks only.** The kernel is correct when every tile's height is a multiple
+>   of 6 and its width a multiple of 32, so n and the tile must be multiples of 96. The code for
+>   the leftover rows and columns is not written yet. At any other size `multiplyBlocked` and
+>   `multiplyBlockedParallel` on this branch return wrong results, and `make test` fails.
+> - **Sizes chosen to fit.** The suite's usual sizes are not multiples of 96, so v4\*'s run uses
+>   n = 96 to 4032 in multiples of 96, with tile 192
+>   ([the command](bench/README.md#running)). v3's kernel was rerun at the same sizes as the
+>   baseline, `v3-same-sizes`. The numbers at n = 2000 and tile 48 will come with the edge code.
+> - **Small matrices.** At n = 96 OpenBLAS is level or ahead, 30.0 against 29.5 FLOP/cycle.
+> - **OpenBLAS on many threads.** Its multi-thread results are erratic under WSL2, so read the
+>   pool's lead over it with care. See [the thread pool](#the-thread-pool).
+> - **A second check agrees.** `make v4-fullblock`
+>   ([experiments/v4_fullblock.cpp](experiments/v4_fullblock.cpp)) times the kernel and OpenBLAS
+>   pinned to one core, both adding A x B into a result that is already allocated. At n = 2016 it
+>   reads 28.4 against 25.6 FLOP/cycle.
+
+**Still to do.** The edge code, then the suite at its usual sizes and a new default tile.
 
 ## The thread pool
 
@@ -230,47 +325,60 @@ dependency chains, register blocks and edges.
 take `std::function` tasks from one shared queue, with `enqueue` and `waitAll`.
 `multiplyBlockedParallel` enqueues one task per tile of C, so no two tasks write the same elements.
 
-![Speedup by number of workers at n = 2000](bench/plots/thread_scaling.png)
+![Speedup by number of workers at n = 2016](bench/plots/thread_scaling.png)
 
-With v3's kernel at n = 2000, 8 workers run 5.6x faster than the single-threaded code and 16
-workers 7.8x, on 8 cores with 2 hardware threads each. OpenBLAS gets 6.7x from the same 16
-threads. Between 1 and 16 workers the busy cores' clock drops from 5.08 to 4.57 GHz and L1 misses
-per multiply-add rise from 0.011 to 0.030.
+With v4\*'s kernel at n = 2016 and tile 192, 8 workers run 6.2x faster than the single-threaded
+code and 16 workers 7.1x, on 8 cores with 2 hardware threads each: 864 and 987 GFLOP/s. v3's
+kernel scaled about the same (6.0x and 7.1x), so the pool carries the kernel's 3.9x through to
+every worker count.
+
+- **The second hardware thread adds little.** Going from 8 to 16 workers adds 14%. Both threads of
+  a core share its two FMA units, and one thread of this kernel already keeps them 91% busy.
+- **Against OpenBLAS.** In this run OpenBLAS reaches 542 GFLOP/s on 8 threads and 649 on 16.
+  Its 16-thread repetitions ranged from 455 to 702, and the v3 run measured 842, so that number
+  is not a steady one on this machine. On one thread, where it is steady, the pool's kernel leads
+  by 9%.
 
 ## Results
 
-![GFLOP/s of each implementation at n = 2000](bench/plots/headline.png)
+![GFLOP/s of each implementation at n = 2016](bench/plots/headline.png)
 
-Every table uses tile 48 so that the versions line up, but the best tile has moved as the kernel
-changed: 48 for v0, 256 for v1 and v2, and 192 for v3 (7.64 FLOP/cycle). A longer row spreads each
-row's setup over more vector FMAs, until B's tile no longer fits in the 1 MiB L2.
+This is v4\*'s run, on the sizes its kernel handles: n = 96 to 4032 in multiples of 96, at tile
+192. The hollow markers are v3's kernel rerun at the same sizes and tile. v3's own run at
+n = 2000 and tile 48 is in [bench/results/v3.json](bench/results/v3.json).
+
+- **The tile matters less than it did.** On one thread, tiles 96, 192 and 288 are within 2% of
+  each other, and larger tiles fall up to 13% behind. With 8 workers tile 192 is the fastest.
+- **Size barely matters.** One thread holds 137 to 145 GFLOP/s from n = 96 to 4032.
+- **Ignore "vs naive" here.** The naive loop is unusually slow at n = 2016: 2.11 GFLOP/s, against
+  4.02 at n = 2000. Compare v4\* with v3 and OpenBLAS instead.
 
 <details>
 <summary><b>Every chart and table from the latest run</b> (by matrix size, thread scaling, tile sweep)</summary>
 
 <!-- results:start -->
 
-## Benchmark results: v3
+## Benchmark results: v4-partial
 
 - Machine: AMD Ryzen 7 9800X3D 8-Core Processor; 8 cores, 16 hardware threads; L1d 48 KiB and L2 1 MiB per core, L3 96 MiB shared by all 8 cores
-- Build: gcc 13.3.0, `-std=c++20 -Wall -Wextra -Iinclude -pthread -O3 -march=native -g -falign-loops=64`, git v3
+- Build: gcc 13.3.0, `-std=c++20 -Wall -Wextra -Iinclude -pthread -O3 -march=native -g -falign-loops=64`, git v4-partial
 - Reference: OpenBLAS 0.3.26 NO_LAPACKE DYNAMIC_ARCH NO_AFFINITY Cooperlake MAX_THREADS=64 core=Cooperlake
-- Run: 2026-11-14T02:44:08-07:00, median of 5 repetitions, wall-clock time, every result checked with Freivalds' algorithm
-- Baseline: v2, run 2026-11-04T03:46:31-07:00. The charts draw its blocked kernels as hollow markers and dashed lines; "vs v2" columns are speedups over it.
+- Run: 2026-11-23T20:31:16-07:00, median of 5 repetitions, wall-clock time on the raw clock (CPU / wall on one thread: 1.00), every result checked with Freivalds' algorithm
+- Baseline: v3-same-sizes, run 2026-11-23T20:46:07-07:00, wall-clock time on the raw clock (CPU / wall on one thread: 1.00). The charts draw its blocked kernels as hollow markers and dashed lines; "vs v3-same-sizes" columns are speedups over it in time, so they carry any difference between the two clocks. FLOP/cycle does not.
 
-### Headline: n = 2000, tile 48
+### Headline: n = 2016, tile 192
 
-![GFLOP/s of each implementation at n = 2000](bench/plots/headline.png)
+![GFLOP/s of each implementation at n = 2016](bench/plots/headline.png)
 
-| Implementation | Threads | Time (ms) | GFLOP/s | vs naive | vs v2 | vs OpenBLAS, same threads | CV |
+| Implementation | Threads | Time (ms) | GFLOP/s | vs naive | vs v3-same-sizes | vs OpenBLAS, same threads | CV |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| multiplyNaive | 1 | 3,979 | 4.02 | 1x | - | 3.2% | 6.9% |
-| multiplyBlocked | 1 | 533 | 30 | 7.47x | 1.34x | 23.9% | 7.3% |
-| multiplyBlockedParallel | 8 | 95.1 | 168 | 41.8x | 1.46x | 31.5% | 8.0% |
-| multiplyBlockedParallel | 16 | 68.6 | 233 | 58x | 1.39x | 27.7% | 13.8% |
-| OpenBLAS dgemm | 1 | 127 | 126 | 31.3x | - | 100.0% | 1.0% |
-| OpenBLAS dgemm | 8 | 30 | 534 | 133x | - | 100.0% | 5.5% |
-| OpenBLAS dgemm | 16 | 19 | 842 | 209x | - | 100.0% | 56.4% |
+| multiplyNaive | 1 | 7,763 | 2.11 | 1x | - | 1.7% | 19.9% |
+| multiplyBlocked | 1 | 118 | 138 | 65.6x | 3.78x | 109.0% | 2.0% |
+| multiplyBlockedParallel | 8 | 19 | 864 | 409x | 3.93x | 159.3% | 3.6% |
+| multiplyBlockedParallel | 16 | 16.6 | 987 | 467x | 3.79x | 152.1% | 1.3% |
+| OpenBLAS dgemm | 1 | 129 | 127 | 60.1x | - | 100.0% | 1.2% |
+| OpenBLAS dgemm | 8 | 30.2 | 542 | 257x | - | 100.0% | 2.0% |
+| OpenBLAS dgemm | 16 | 25.3 | 649 | 307x | - | 100.0% | 19.6% |
 
 ### By matrix size, one thread
 
@@ -280,55 +388,52 @@ row's setup over more vector FMAs, until B's tile no longer fits in the 1 MiB L2
 
 GFLOP/s, then hardware-counter events per multiply-add (N = naive, B = blocked).
 
-| n | Naive | Blocked | Blocked / naive | Blocked vs v2 | OpenBLAS | L1D miss N | L1D miss B | L2 miss N | L2 miss B | DRAM fill N | DRAM fill B |
+| n | Naive | Blocked | Blocked / naive | Blocked vs v3-same-sizes | OpenBLAS | L1D miss N | L1D miss B | L2 miss N | L2 miss B | DRAM fill N | DRAM fill B |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 100 | 6.29 | 20.1 | 3.20x | 1.37x | 146 | 0.132 | 0.0202 | 9.79e-05 | 2.74e-05 | 1.58e-06 | 4.98e-07 |
-| 200 | 5.87 | 28.2 | 4.80x | 1.37x | 111 | 0.13 | 0.014 | 0.000607 | 0.000249 | 6.42e-06 | 1.32e-07 |
-| 300 | 5.43 | 22.8 | 4.21x | 1.40x | 113 | 0.134 | 0.0134 | 0.000978 | 0.00094 | 2.17e-05 | 4.42e-06 |
-| 500 | 5.11 | 23.4 | 4.59x | 1.37x | 120 | 0.158 | 0.0134 | 0.0276 | 0.00116 | 5.37e-05 | 8.95e-06 |
-| 700 | 4.95 | 23.2 | 4.68x | 1.36x | 123 | 0.552 | 0.0123 | 0.0493 | 0.00146 | 0.000146 | 0.000105 |
-| 1000 | 4.16 | 30.4 | 7.29x | 1.33x | 125 | 1.13 | 0.0111 | 0.0214 | 0.00128 | 1.36e-05 | 2.71e-05 |
-| 1500 | 4.02 | 23.4 | 5.84x | 1.40x | 125 | 1.13 | 0.0126 | 0.0461 | 0.00229 | 4.93e-05 | 2.33e-05 |
-| 2000 | 4.02 | 30 | 7.47x | 1.34x | 126 | 1.09 | 0.0112 | 0.0654 | 0.00178 | 0.00011 | 7.27e-05 |
-| 3000 | 1.92 | 29.2 | 15.20x | 1.35x | 126 | 1.13 | 0.0109 | 0.0676 | 0.00224 | 0.00702 | 0.000362 |
-| 4000 | 1.22 | 28.5 | 23.40x | 1.36x | 130 | 1.16 | 0.011 | 0.633 | 0.00182 | 0.0734 | 0.00129 |
+| 96 | 6.71 | 145 | 21.57x | 3.37x | 147 | 0.132 | 0.0276 | 0.000261 | 9.48e-06 | 2.03e-06 | 1.53e-08 |
+| 192 | 3.39 | 142 | 41.98x | 2.96x | 107 | 1.03 | 0.0326 | 0.000911 | 0.000173 | 2.69e-06 | 2.07e-08 |
+| 288 | 4.68 | 142 | 30.24x | 3.90x | 116 | 1.03 | 0.028 | 0.00319 | 0.000334 | 1.33e-05 | 1.28e-07 |
+| 480 | 4.64 | 145 | 31.24x | 3.84x | 120 | 1.04 | 0.0281 | 0.0888 | 0.000332 | 0.000192 | 7.39e-07 |
+| 672 | 4.57 | 143 | 31.38x | 3.83x | 121 | 1.04 | 0.028 | 0.0609 | 0.000333 | 0.000227 | 3.02e-06 |
+| 960 | 3.01 | 143 | 47.58x | 3.89x | 122 | 1.03 | 0.0265 | 0.0194 | 0.000348 | 5.3e-05 | 1.5e-05 |
+| 1440 | 4.33 | 142 | 32.85x | 3.84x | 125 | 1.05 | 0.028 | 0.0618 | 0.000375 | 4.29e-05 | 2.72e-05 |
+| 2016 | 2.11 | 138 | 65.58x | 3.78x | 127 | 1.16 | 0.0283 | 0.105 | 0.000311 | 0.00102 | 7.42e-05 |
+| 2880 | 1.7 | 139 | 81.68x | 3.82x | 130 | 1.21 | 0.0264 | 0.492 | 0.00031 | 0.0189 | 0.000325 |
+| 4032 | 1.36 | 137 | 100.74x | 3.72x | 129 | 1.21 | 0.0265 | 0.723 | 0.000306 | 0.0937 | 0.000454 |
 
-### Thread scaling: n = 2000, tile 48
+### Thread scaling: n = 2016, tile 192
 
-![Speedup by number of workers at n = 2000](bench/plots/thread_scaling.png)
+![Speedup by number of workers at n = 2016](bench/plots/thread_scaling.png)
 
 Speedup is against single-threaded multiplyBlocked; efficiency divides it by the physical cores in use (at most 8). GHz is the average clock of the busy cores; IPC is per hardware thread.
 
-| Workers | Time (ms) | GFLOP/s | vs v2 | Speedup | Efficiency | GHz | IPC | L1D miss/FMA | OpenBLAS GFLOP/s | OpenBLAS speedup |
+| Workers | Time (ms) | GFLOP/s | vs v3-same-sizes | Speedup | Efficiency | GHz | IPC | L1D miss/FMA | OpenBLAS GFLOP/s | OpenBLAS speedup |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 524 | 30.5 | 1.63x | 1.02 | 102% | 5.08 | 4.11 | 0.011 | 126 | 1 |
-| 2 | 294 | 54.4 | 1.62x | 1.81 | 90% | 4.96 | 3.74 | 0.013 | 232 | 1.84 |
-| 4 | 161 | 99.6 | 1.54x | 3.32 | 83% | 4.99 | 3.61 | 0.0139 | 408 | 3.25 |
-| 6 | 111 | 144 | 1.54x | 4.78 | 80% | 4.9 | 3.5 | 0.0149 | 488 | 3.88 |
-| 8 | 95.1 | 168 | 1.46x | 5.6 | 70% | 4.76 | 3.17 | 0.0179 | 534 | 4.24 |
-| 10 | 81.7 | 196 | 1.48x | 6.52 | 81% | 4.75 | 3.02 | 0.0198 | 628 | 5 |
-| 12 | 79.9 | 200 | 1.38x | 6.67 | 83% | 4.72 | 2.58 | 0.026 | 710 | 5.65 |
-| 14 | 73.2 | 219 | 1.40x | 7.28 | 91% | 4.59 | 2.56 | 0.0282 | 815 | 6.48 |
-| 16 | 68.6 | 233 | 1.39x | 7.77 | 97% | 4.57 | 2.42 | 0.0301 | 842 | 6.7 |
+| 1 | 117 | 140 | 3.87x | 1.01 | 101% | 4.81 | 2.89 | 0.0283 | 127 | 1 |
+| 2 | 60.9 | 269 | 3.79x | 1.94 | 97% | 4.71 | 2.87 | 0.0283 | 236 | 1.86 |
+| 4 | 32.3 | 508 | 3.75x | 3.67 | 92% | 4.64 | 2.78 | 0.0283 | 406 | 3.2 |
+| 6 | 22.8 | 719 | 3.95x | 5.19 | 87% | 4.56 | 2.71 | 0.0283 | 503 | 3.96 |
+| 8 | 19 | 864 | 3.93x | 6.24 | 78% | 4.51 | 2.49 | 0.0283 | 542 | 4.27 |
+| 10 | 17.9 | 914 | 3.74x | 6.6 | 83% | 4.44 | 2.18 | 0.0283 | 615 | 4.85 |
+| 12 | 17.1 | 959 | 3.78x | 6.93 | 87% | 4.37 | 1.94 | 0.0283 | 713 | 5.62 |
+| 14 | 16.6 | 988 | 3.78x | 7.13 | 89% | 4.32 | 1.76 | 0.0283 | 790 | 6.23 |
+| 16 | 16.6 | 987 | 3.79x | 7.13 | 89% | 4.09 | 1.66 | 0.0283 | 649 | 5.11 |
 
-### Tile sweep: n = 2000
+### Tile sweep: n = 2016
 
-![GFLOP/s by tile size at n = 2000](bench/plots/tile_sweep.png)
+![GFLOP/s by tile size at n = 2016](bench/plots/tile_sweep.png)
 
-| Tile | 1 thread GFLOP/s | vs v2 | IPC | L1D miss/FMA | L2 miss/FMA | 8 workers GFLOP/s | vs v2 |
+Best tile: 1 thread 288 (141 GFLOP/s, +2% against tile 192); 8 workers 192 (864 GFLOP/s, +0% against tile 192).
+
+| Tile | 1 thread GFLOP/s | vs v3-same-sizes | IPC | L1D miss/FMA | L2 miss/FMA | 8 workers GFLOP/s | vs v3-same-sizes |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| 8 | 11.3 | 1.52x | 5.29 | 0.0375 | 0.00915 | 72.3 | 1.62x |
-| 16 | 16 | 1.34x | 4.11 | 0.0198 | 0.00582 | 100 | 1.53x |
-| 24 | 19.9 | 1.28x | 3.93 | 0.0141 | 0.00589 | 104 | 1.37x |
-| 32 | 23.5 | 1.28x | 3.85 | 0.0147 | 0.00399 | 129 | 1.37x |
-| 48 | 30 | 1.34x | 4.05 | 0.0112 | 0.00178 | 168 | 1.46x |
-| 64 | 35.1 | 1.47x | 4.22 | 0.0146 | 0.00238 | 189 | 1.49x |
-| 96 | 34.5 | 1.52x | 3.81 | 0.13 | 0.00197 | 202 | 1.49x |
-| 128 | 35.9 | 1.46x | 3.62 | 0.129 | 0.00178 | 212 | 1.40x |
-| 192 | 36.6 | 1.38x | 3.44 | 0.127 | 0.00156 | 216 | 1.26x |
-| 256 | 35.5 | 1.26x | 3.21 | 0.129 | 0.00158 | 202 | 1.08x |
-| 384 | 30.1 | 1.17x | 2.59 | 0.135 | 0.0246 | 159 | 1.05x |
-| 512 | 27.7 | 1.10x | 2.29 | 0.139 | 0.0918 | 131 | 1.01x |
+| 96 | 140 | 3.99x | 2.93 | 0.0262 | 0.000471 | 839 | 4.02x |
+| 192 | 138 | 3.78x | 2.91 | 0.0283 | 0.000311 | 864 | 3.93x |
+| 288 | 141 | 3.98x | 2.92 | 0.0272 | 0.000312 | 769 | 3.99x |
+| 384 | 130 | 4.44x | 2.7 | 0.0265 | 0.000634 | 763 | 4.55x |
+| 480 | 125 | 4.39x | 2.62 | 0.0262 | 0.000728 | 680 | 4.71x |
+| 576 | 125 | 4.43x | 2.6 | 0.0262 | 0.000715 | 665 | 5.01x |
+| 768 | 122 | 4.39x | 2.53 | 0.0259 | 0.000873 | 601 | 4.54x |
 
 <!-- results:end -->
 
@@ -357,6 +462,8 @@ the AOCL-BLAS reference suite, comparing two versions, and what each counter mea
   which makes 32 FLOP/cycle.
 - **Timing.** Wall-clock time on `CLOCK_MONOTONIC_RAW`, the median of 5 repetitions interleaved
   across the whole suite. GFLOP/s = 2n³ / time.
+- **Sizes.** v0 to v3 are quoted at n = 2000 and tile 48. v4\* cannot run those yet, so it is
+  quoted at n = 2016 and tile 192, with v3 and OpenBLAS measured again at that size.
 - **Every result is checked** with Freivalds' algorithm after timing, so a fast but broken kernel
   cannot post a number.
 - **Counters** come from `perf_event_open` around the timed loop, reported per multiply-add:

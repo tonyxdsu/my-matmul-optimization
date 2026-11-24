@@ -69,6 +69,12 @@ EXP_CPU ?= 2
 # Turns off the compiler's auto-vectorization, to measure a loop without SIMD.
 NO_SIMD_FLAGS = -fno-tree-vectorize -fno-tree-slp-vectorize
 CHAIN_DEMO_DEPS = $(EXP_DIR)/chain_demo.cpp $(BENCH_DIR)/perf_counters.cpp $(BENCH_DIR)/perf_counters.hpp
+# The v4 full-block check links the library objects, and OpenBLAS when it is installed.
+V4_FULLBLOCK_DEPS = $(EXP_DIR)/v4_fullblock.cpp $(BENCH_DIR)/perf_counters.cpp $(BENCH_DIR)/perf_counters.hpp
+ifeq ($(OPENBLAS),1)
+V4_FULLBLOCK_BLAS = -DHAVE_OPENBLAS $(shell pkg-config --cflags openblas)
+V4_FULLBLOCK_LIBS = $(shell pkg-config --libs openblas)
+endif
 
 # Benchmark runs. Results go to bench/results/<LABEL>.json. LABEL defaults to the commit the
 # sources came from, plus -dirty if they have uncommitted changes. Set it to name a run:
@@ -81,7 +87,14 @@ BENCH_REPS ?= 5
 # TILE overrides the default tile edge (kBlockSize in bench/bench_common.hpp) for one run,
 # without a rebuild:  make bench-run TILE=192
 TILE ?=
-BENCH_ENV = $(if $(TILE),BENCH_TILE=$(TILE))
+# SIZES, FIXED_N and TILES override the size sweep, the size of the thread-scaling and tile
+# sweeps, and the tile sweep's tiles (kSizes, kFixedN, kTileSizes) the same way, as
+# comma-separated lists:  make bench-run SIZES=96,480,2016 FIXED_N=2016 TILES=96,192,384 TILE=192
+SIZES ?=
+FIXED_N ?=
+TILES ?=
+BENCH_ENV = $(if $(TILE),BENCH_TILE=$(TILE)) $(if $(SIZES),BENCH_SIZES=$(SIZES)) \
+	$(if $(FIXED_N),BENCH_FIXED_N=$(FIXED_N)) $(if $(TILES),BENCH_TILES=$(TILES))
 BENCH_FLAGS = --benchmark_counters_tabular=true --benchmark_context=git=$(LABEL)
 COMPARE_PY ?= /usr/share/benchmark/compare.py
 
@@ -154,6 +167,12 @@ $(BUILD_DIR)/chain_demo_nosimd: $(CHAIN_DEMO_DEPS)
 	$(CXX) $(CXXFLAGS) $(NO_SIMD_FLAGS) -I$(BENCH_DIR) -DEXP_CXXFLAGS='"$(CXXFLAGS) $(NO_SIMD_FLAGS)"' \
 		$(EXP_DIR)/chain_demo.cpp $(BENCH_DIR)/perf_counters.cpp -o $@
 
+# The v4 full-block check: the library's multiplyBlock on sizes it already handles, and OpenBLAS.
+$(BUILD_DIR)/v4_fullblock: $(V4_FULLBLOCK_DEPS) $(LIB_OBJS)
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -I$(BENCH_DIR) $(V4_FULLBLOCK_BLAS) -DEXP_CXXFLAGS='"$(CXXFLAGS)"' \
+		$(EXP_DIR)/v4_fullblock.cpp $(BENCH_DIR)/perf_counters.cpp $(LIB_OBJS) $(V4_FULLBLOCK_LIBS) -o $@
+
 # Run tests
 test: $(TEST_TARGET)
 	./$(TEST_TARGET)
@@ -201,6 +220,11 @@ chain-demo: $(BUILD_DIR)/chain_demo_nosimd $(BUILD_DIR)/chain_demo
 	@echo
 	taskset -c $(EXP_CPU) ./$(BUILD_DIR)/chain_demo
 
+# v4 in progress, about 1 minute: the register-blocked kernel on sizes made of whole register
+# blocks, next to one-thread OpenBLAS. See the header of experiments/v4_fullblock.cpp.
+v4-fullblock: $(BUILD_DIR)/v4_fullblock
+	taskset -c $(EXP_CPU) ./$(BUILD_DIR)/v4_fullblock
+
 # Register-blocking assignment (exercises/register_blocking/, see ASSIGNMENT.md there): your
 # exercises.cpp and the reference solution.cpp, each built with the same harness and run pinned to
 # core EXP_CPU. EX=n runs exercise n only. -Wno-unused-parameter keeps the stubs quiet.
@@ -232,4 +256,4 @@ run: all
 
 -include $(wildcard $(BUILD_DIR)/*.d)
 
-.PHONY: all test bench bench-run bench-quick bench-aocl bench-aocl-run bench-plot bench-compare chain-demo regblock regblock-solution clean run
+.PHONY: all test bench bench-run bench-quick bench-aocl bench-aocl-run bench-plot bench-compare chain-demo v4-fullblock regblock regblock-solution clean run

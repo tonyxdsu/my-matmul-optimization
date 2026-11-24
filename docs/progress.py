@@ -7,6 +7,11 @@ OpenBLAS and the core's limit for scale.
 The values are the medians of `FLOP/cycle` at n = 2000, tile 48, in bench/results/v0.json to
 v3.json (naive and OpenBLAS read the same in all four). When a version lands, add its row to ROWS
 and update TITLE.
+
+v4* is the exception while v4 is in progress: its kernel only handles whole register blocks, so
+its value comes from bench/results/v4-partial.json and its step over v3 from v3-same-sizes.json,
+both at n = 2016, tile 192, and FOOTNOTE says so. When v4 handles edges, replace that row with
+the number at n = 2000 and set FOOTNOTE to None.
 """
 
 from pathlib import Path
@@ -25,8 +30,8 @@ COLORS = {
     "ours": "#3987e5", "reference": "#898781",
 }
 PEAK = 32.0                           # FLOP/cycle: two 512-bit FMAs per cycle, 8 doubles each
-TITLE = "Four changes took one thread from 0.80 to 6.10 FLOP per cycle"
-SUBTITLE = ("Multiplies and adds per CPU cycle on one thread at n = 2000, tile 48. "
+TITLE = "Five changes took one thread from 0.80 to 29.1* FLOP per cycle"
+SUBTITLE = ("Multiplies and adds per cycle on one thread at n = 2000, tile 48 (v4*: see the note). "
             "The step over the version before is in gray.")
 # (name, what changed, FLOP/cycle, step over the row above measured in the same run, kind)
 ROWS = [
@@ -35,10 +40,14 @@ ROWS = [
     ("v1", "i-k-j order, vectorized", 2.58, 1.73, "ours"),
     ("v2", "aligned storage", 4.31, 1.67, "ours"),
     ("v3", "hoisted invariants", 6.10, 1.42, "ours"),
+    ("v4*", "register blocking", 29.1, 3.89, "ours"),
     ("OpenBLAS", "reference library", 26.0, None, "reference"),
 ]
+# Printed under the chart, or None.
+FOOTNOTE = ("* In progress: v4 handles whole register blocks only, so it is measured at n = 2016, tile 192, where\n"
+            "v3 runs at 7.48 (the 3.89x) and OpenBLAS at 25.8. Other sizes need the edge code that is still to come.")
 
-WIDTH, HEIGHT, DPI = 8.0, 3.2, 200    # inches; the PNG is 1600 x 640 pixels
+WIDTH, HEIGHT, DPI = 8.0, 3.95, 200   # inches; the PNG is 1600 x 790 pixels
 LEFT = 0.32                           # left margin, inches
 NAME_X = LEFT                         # version names
 WHAT_X = 1.34                         # what changed
@@ -46,7 +55,7 @@ BAR_X = 3.0                           # where the bars start, inches
 SCALE = (7.3 - BAR_X) / PEAK          # inches per FLOP/cycle: the limit lands at x = 7.3
 BAR_H = 0.2                           # bar thickness, inches
 RADIUS = 0.04                         # rounding of a bar's far end, inches
-TOP_Y, PITCH = 2.38, 0.32             # centre of the first bar, and the distance between bars
+TOP_Y, PITCH = 3.13, 0.32             # centre of the first bar, and the distance between bars
 
 
 def bar(ax, y, value, color):
@@ -76,6 +85,9 @@ def main():
             linestyle=(0, (3, 3)))
     ax.text(WIDTH - LEFT, bottom_y - 0.42, "32: the core's limit, two 512-bit FMAs per cycle", ha="right",
             va="center", fontsize=7.8, color=COLORS["ink2"])
+    if FOOTNOTE:
+        ax.text(LEFT, bottom_y - 0.84, FOOTNOTE, ha="left", va="center", fontsize=7.4, color=COLORS["ink2"],
+                linespacing=1.45)
     # The baseline the bars grow from.
     ax.plot([BAR_X, BAR_X], [bottom_y - 0.2, TOP_Y + 0.2], color=COLORS["edge"], linewidth=1)
 
@@ -86,10 +98,19 @@ def main():
         tip = bar(ax, y, value, COLORS[kind])
         label = ax.text(tip + 0.09, y, f"{value:.2f}" if value < 10 else f"{value:.1f}", ha="left",
                         va="center", fontsize=9.5, fontweight="bold", color=COLORS["ink"])
+        width = label.get_window_extent(renderer=fig.canvas.get_renderer()).width / fig.dpi
+        # A bar that ends near the limit line has no room after it: its labels go inside its end.
+        inside = value < PEAK and tip + 0.09 + width + 0.06 > peak_x
+        if inside:
+            label.set_position((tip - 0.1, y))
+            label.set_ha("right")
         if step is not None:
-            width = label.get_window_extent(renderer=fig.canvas.get_renderer()).width / fig.dpi
-            ax.text(tip + 0.09 + width + 0.1, y, f"{step:.2f}x", ha="left", va="center", fontsize=8.4,
-                    color=COLORS["muted"])
+            if inside:
+                ax.text(tip - 0.1 - width - 0.12, y, f"{step:.2f}x", ha="right", va="center", fontsize=8.4,
+                        color=COLORS["ink"])
+            else:
+                ax.text(tip + 0.09 + width + 0.1, y, f"{step:.2f}x", ha="left", va="center", fontsize=8.4,
+                        color=COLORS["muted"])
 
     fig.savefig(OUT / "progress.png", facecolor=COLORS["surface"])
     plt.close(fig)
