@@ -85,25 +85,25 @@ void BM_BlockedParallel(benchmark::State& state) {
 
 // Naive vs blocked: the size sweep.
 void sizeArgs(benchmark::internal::Benchmark* b) {
-    for (auto n : bench::kSizes) b->Args({n});
+    for (auto n : bench::sizes()) b->Args({n});
 }
 
-// The size sweep at the default tile, plus the tile sweep at kFixedN.
+// The size sweep at the default tile, plus the tile sweep at fixedN().
 void blockedArgs(benchmark::internal::Benchmark* b) {
-    for (auto n : bench::kSizes) b->Args({n, bench::blockSize()});
-    for (auto bs : bench::kTileSizes) {
-        const bool alreadyAdded = bs == bench::blockSize() && bench::contains(bench::kSizes, bench::kFixedN);
-        if (!alreadyAdded) b->Args({bench::kFixedN, bs});
+    for (auto n : bench::sizes()) b->Args({n, bench::blockSize()});
+    for (auto bs : bench::tileSizes()) {
+        const bool alreadyAdded = bs == bench::blockSize() && bench::contains(bench::sizes(), bench::fixedN());
+        if (!alreadyAdded) b->Args({bench::fixedN(), bs});
     }
 }
 
 // Thread scaling at the default tile, plus the tile sweep at kTileSweepWorkers workers.
 void blockedParallelArgs(benchmark::internal::Benchmark* b) {
     const auto workers = bench::workerCounts();
-    for (auto w : workers) b->Args({bench::kFixedN, bench::blockSize(), w});
-    for (auto bs : bench::kTileSizes) {
+    for (auto w : workers) b->Args({bench::fixedN(), bench::blockSize(), w});
+    for (auto bs : bench::tileSizes()) {
         const bool alreadyAdded = bs == bench::blockSize() && bench::contains(workers, bench::kTileSweepWorkers);
-        if (!alreadyAdded) b->Args({bench::kFixedN, bs, bench::kTileSweepWorkers});
+        if (!alreadyAdded) b->Args({bench::fixedN(), bs, bench::kTileSweepWorkers});
     }
 }
 

@@ -56,12 +56,12 @@ void BM_AOCL(benchmark::State& state) {
     if (workers > 1) std::this_thread::sleep_for(std::chrono::milliseconds(150));
 }
 
-// The same points as BM_OpenBLAS: the single-threaded size sweep, plus thread scaling at kFixedN.
+// The same points as BM_OpenBLAS: the single-threaded size sweep, plus thread scaling at fixedN().
 void aoclArgs(benchmark::internal::Benchmark* b) {
-    for (auto n : bench::kSizes) b->Args({n, 1});
+    for (auto n : bench::sizes()) b->Args({n, 1});
     for (auto w : bench::workerCounts()) {
-        const bool alreadyAdded = w == 1 && bench::contains(bench::kSizes, bench::kFixedN);
-        if (!alreadyAdded) b->Args({bench::kFixedN, w});
+        const bool alreadyAdded = w == 1 && bench::contains(bench::sizes(), bench::fixedN());
+        if (!alreadyAdded) b->Args({bench::fixedN(), w});
     }
 }
 

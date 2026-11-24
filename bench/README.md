@@ -64,6 +64,15 @@ measured (`22af068`, or `22af068-dirty` with uncommitted changes). Name a run yo
 `make bench-run ARGS=--benchmark_filter=BM_Blocked/` to run one family, and set the number of
 repetitions with `BENCH_REPS=9`. `TILE=192` runs with another default tile than `kBlockSize`.
 
+`SIZES`, `FIXED_N` and `TILES` replace the size sweep, the size of the thread-scaling and tile
+sweeps, and the tile sweep's tiles for one run, as comma-separated lists. They exist for a kernel
+that only handles some shapes. The unfinished v4 kernel needs multiples of 96, so its run was:
+
+```sh
+make bench-run LABEL=v4-partial TILE=192 FIXED_N=2016 \
+    SIZES=96,192,288,480,672,960,1440,2016,2880,4032 TILES=96,192,288,384,480,576,768
+```
+
 For clean numbers: close other programs, use the Windows "Best performance" power mode, pause
 OneDrive syncing (this repository is inside OneDrive, which uploads every file written during
 the run), and leave the machine alone. Then check the CV column; see "Noise" below.

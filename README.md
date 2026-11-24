@@ -9,13 +9,14 @@ triple loop toward BLAS speed, one measured change per version.
 ![GCC 13.3](https://img.shields.io/badge/GCC-13.3-555555?style=flat-square&logo=gnu&logoColor=white)
 ![AVX-512](https://img.shields.io/badge/SIMD-AVX--512-3987e5?style=flat-square)
 ![Zen 5](https://img.shields.io/badge/CPU-Zen%205-d95926?style=flat-square&logo=amd&logoColor=white)
-![Progress](https://img.shields.io/badge/progress-v3%20of%20v4-2ea043?style=flat-square)
+![Progress](https://img.shields.io/badge/progress-v4%20in%20progress-2ea043?style=flat-square)
 
 [At a glance](#versions-at-a-glance) ·
 [v0](#v0-cache-blocking) ·
 [v1](#v1-loop-interchange) ·
 [v2](#v2-cache-line-aligned-storage) ·
 [v3](#v3-hoist-loop-invariants) ·
+[v4*](#v4-register-blocking-in-progress) ·
 [Thread pool](#the-thread-pool) ·
 [Results](#results) ·
 [Run it](#run-it) ·
@@ -23,12 +24,18 @@ triple loop toward BLAS speed, one measured change per version.
 
 </div>
 
-![FLOP per cycle of each version on one thread: naive 0.80, v0 1.49, v1 2.58, v2 4.31, v3 6.10, OpenBLAS 26.0, against a limit of 32](docs/progress.png)
+![FLOP per cycle of each version on one thread: naive 0.80, v0 1.49, v1 2.58, v2 4.31, v3 6.10, v4* 28.4, OpenBLAS 26.0, against a limit of 32. v4* is in progress and is measured at n = 2016, tile 192, where OpenBLAS runs at 25.6](docs/progress.png)
 
-So far the kernel is about **7.5x** faster than the naive loop on one thread and **58x** faster on
-the pool's 16 workers. It runs at about a quarter of OpenBLAS's speed, so there is a long way to go.
-Every number comes from [Google Benchmark](https://github.com/google/benchmark) with hardware
-performance counters, on a Ryzen 7 9800X3D.
+v3, the last finished version, is about **7.5x** faster than the naive loop on one thread and
+**58x** faster on the pool's 16 workers, at about a quarter of OpenBLAS's speed.
+
+**v4\*** is in progress. Its kernel so far handles only matrices made of whole register blocks. On
+those it runs at **28 to 30 FLOP/cycle** on one thread from n = 192 to 2016, where OpenBLAS runs at
+22 to 26. [What the asterisk covers](#v4-register-blocking-in-progress) is spelled out below.
+
+The numbers for v0 to v3 come from [Google Benchmark](https://github.com/google/benchmark) with
+hardware performance counters, and v4\*'s from a standalone check that uses the same counters, all
+on a Ryzen 7 9800X3D.
 
 ## Versions at a glance
 
@@ -42,8 +49,12 @@ limit is 32.
 | [v1](#v1-loop-interchange) | Loop order i-k-j, which lets GCC vectorize with AVX-512 | 2.58 | 1.73x | 1.95 | 2.52 |
 | [v2](#v2-cache-line-aligned-storage) | Matrices start on a 64-byte cache line | 4.31 | 1.67x | 1.70 | 3.67 |
 | [v3](#v3-hoist-loop-invariants) | Loop invariants computed once, outside the loops | 6.10 | 1.42x | 1.33 | 4.05 |
-| [v4](#v4-register-blocking-planned) | Register blocking | *planned* | | | |
+| [v4\*](#v4-register-blocking-in-progress) | A 6 x 32 block of C stays in registers for a whole k block | 28.4\* | 3.87x\* | 0.20 | 2.85 |
 | OpenBLAS | Reference: hand-written AVX-512 kernels | 26.0 | | 0.23 | 2.94 |
+
+\* v4 is in progress and handles whole register blocks only, which n = 2000 and tile 48 are not.
+Its row is n = 2016, tile 192, from `make v4-fullblock`, where v3 runs at 7.34 FLOP/cycle and
+OpenBLAS at 25.6.
 
 Each section below has the same parts: what changed, what it bought, why, and the bottleneck it
 left for the next version.
@@ -217,12 +228,91 @@ boundary.
 > **Next bottleneck.** C still makes a round trip through memory for every k: two loads and a
 > store per vector FMA. v3 reaches 6.10 of a possible 32 FLOP/cycle.
 
-## v4: register blocking (planned)
+## v4: register blocking (in progress)
 
-The plan is to keep a small block of C in registers for a whole k block, so the inner loop stops
-loading and storing C. The warm-up is in
-[exercises/register_blocking](exercises/register_blocking): toy problems on intrinsics,
-dependency chains, register blocks and edges.
+`multiplyBlock` is now written with AVX-512 intrinsics. It keeps a 6 x 32 block of C in 24 `zmm`
+registers for a whole k block: loaded once, updated by 24 FMAs for each k, and stored once.
+
+```
+v3:  for i, for k:
+         for j, 8 at a time:   C[i][j] += A[i][k] * B[k][j]        C is loaded and stored for every FMA
+
+v4:  for i, 6 at a time:   for j, 32 at a time:
+         load the 6 x 32 block of C into 24 registers
+         for k:   every register += its row's A[i][k] * its 8 columns of B[k]
+         store the 24 registers
+```
+
+**Result\*.** On matrices made of whole register blocks, 28 to 30 FLOP/cycle on one thread, against
+7.3 to 7.5 for v3's kernel at n = 960 to 2016 with the same tile. One thread, tile 192, FLOP/cycle:
+
+| n | v4\* | OpenBLAS | v4\* / OpenBLAS |
+|---|---:|---:|---:|
+| 96 (tile 96) | 25.90 | 29.58 | 0.88x |
+| 192 | 30.07 | 22.28 | 1.35x |
+| 480 | 30.38 | 24.79 | 1.23x |
+| 960 | 30.24 | 25.34 | 1.19x |
+| 1920 | 28.90 | 25.51 | 1.13x |
+| 2016 | 28.42 | 25.62 | 1.11x |
+
+**Why.**
+
+- **C stays out of memory.** v3 did two loads and a store for every vector FMA. One pass of v4's k
+  loop does 24 FMAs with 10 loads and no store: 6 values of A, one per row of the block, and 4
+  vectors of B, one per 8 columns.
+- **Fewer instructions.** That pass is 38 instructions for 192 multiply-adds, 0.20 each, against
+  v3's 1.33 at tile 48 and 0.89 at tile 192.
+- **Enough FMAs in flight.** The core can start 2 FMAs per cycle and each takes 4 cycles, so it
+  needs at least 8 that do not wait on each other. The 24 registers are 24 separate chains.
+- **It just fits.** 24 registers of C, 6 of A and 1 of B make 31 of the 32 `zmm` registers. The
+  compiled k loop never touches the stack.
+
+<details>
+<summary><b>The k loop, from <code>objdump</code></b></summary>
+
+One pass, for one k. `zmm0` is the vector of B, `zmm1` to `zmm6` are the 6 values of A, and the
+other 24 registers are the block of C:
+
+```
+vmovupd      zmm0,[rcx]              # B[k], columns j to j+7
+vbroadcastsd zmm6,[rsi+rax*8]        # column k of A in all 8 lanes, for one row of the block
+vbroadcastsd zmm5,[r13+rax*8]        # and for the other 5 rows
+vbroadcastsd zmm4,[r10+rax*8]
+vbroadcastsd zmm3,[r11+rax*8]
+vbroadcastsd zmm2,[rbx+rax*8]
+vbroadcastsd zmm1,[r12+rax*8]
+inc          rax                     # k++
+vfmadd231pd  zmm12,zmm6,zmm0         # 6 rows of C, columns j to j+7
+vfmadd231pd  zmm9,zmm5,zmm0
+vfmadd231pd  zmm23,zmm4,zmm0
+vfmadd231pd  zmm24,zmm3,zmm0
+vfmadd231pd  zmm18,zmm2,zmm0
+vfmadd231pd  zmm25,zmm1,zmm0
+vmovupd      zmm0,[rcx+0x40]         # B[k], columns j+8 to j+15
+...                                  # 6 more FMAs, and the same again for j+16 and j+24
+add          rcx,r9                  # B pointer += one row
+cmp          rdx,rax                 # end of the k block?
+jne          ...
+```
+
+</details>
+
+> [!WARNING]
+> **What the asterisk covers.**
+> - **Whole register blocks only.** The kernel is correct when every tile's height is a multiple
+>   of 6 and its width a multiple of 32, so n and the tile must be multiples of 96. The code for
+>   the leftover rows and columns is not written yet. At any other size `multiplyBlocked` and
+>   `multiplyBlockedParallel` on this branch return wrong results, and `make test` fails.
+> - **A different harness.** The benchmark suite's sizes are not multiples of 96, so these numbers
+>   come from `make v4-fullblock` ([experiments/v4_fullblock.cpp](experiments/v4_fullblock.cpp)).
+>   It times the kernel and one-thread OpenBLAS in one process, calls interleaved, both adding
+>   A x B into a result that is already allocated. Each number is the median, and every result
+>   is checked element by element.
+> - **Small matrices.** At n = 96 OpenBLAS is ahead, 29.6 against 25.9.
+> - **One thread only.** The [thread pool](#the-thread-pool) and [Results](#results) sections
+>   below are still v3.
+
+**Still to do.** The edge code, then a full run of the suite, a new default tile, and the pool.
 
 ## The thread pool
 
@@ -240,6 +330,8 @@ per multiply-add rise from 0.011 to 0.030.
 ## Results
 
 ![GFLOP/s of each implementation at n = 2000](bench/plots/headline.png)
+
+These are v3's results. v4 joins the suite when it handles every size.
 
 Every table uses tile 48 so that the versions line up, but the best tile has moved as the kernel
 changed: 48 for v0, 256 for v1 and v2, and 192 for v3 (7.64 FLOP/cycle). A longer row spreads each

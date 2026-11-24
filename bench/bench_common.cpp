@@ -56,6 +56,40 @@ std::int64_t blockSize() {
     return tile;
 }
 
+namespace {
+
+// The positive integers of a comma-separated environment variable, or fallback if it is unset
+// or holds none.
+std::vector<std::int64_t> listFromEnv(const char* name, std::vector<std::int64_t> fallback) {
+    const char* text = std::getenv(name);
+    std::vector<std::int64_t> values;
+    while (text && *text) {
+        char* end = nullptr;
+        const long long value = std::strtoll(text, &end, 10);
+        if (end == text) break;
+        if (value > 0) values.push_back(static_cast<std::int64_t>(value));
+        text = *end == ',' ? end + 1 : end;
+    }
+    return values.empty() ? fallback : values;
+}
+
+}  // namespace
+
+const std::vector<std::int64_t>& sizes() {
+    static const auto list = listFromEnv("BENCH_SIZES", {std::begin(kSizes), std::end(kSizes)});
+    return list;
+}
+
+std::int64_t fixedN() {
+    static const std::int64_t n = listFromEnv("BENCH_FIXED_N", {kFixedN}).front();
+    return n;
+}
+
+const std::vector<std::int64_t>& tileSizes() {
+    static const auto list = listFromEnv("BENCH_TILES", {std::begin(kTileSizes), std::end(kTileSizes)});
+    return list;
+}
+
 double rawSeconds() {
     timespec now;
     clock_gettime(CLOCK_MONOTONIC_RAW, &now);
