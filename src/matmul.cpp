@@ -1,6 +1,7 @@
 #include "matmul.hpp"
 
 #include <algorithm>
+#include <immintrin.h>
 #include <random>
 
 Matrix multiplyNaive(const Matrix& A, const Matrix& B) {
@@ -23,7 +24,7 @@ Matrix multiplyNaive(const Matrix& A, const Matrix& B) {
             C.at(i, j) = sum;
         }
     }
-
+    
     return C;
 }
 
@@ -62,6 +63,9 @@ Matrix multiplyBlocked(const Matrix& A, const Matrix& B, std::size_t blockSize) 
     return C;
 }
 
+const size_t regVBlockSize = 6;
+const size_t regHBlockSize = 4;
+
 // rowStart, rowEnd, colStart, colEnd are inclusive 
 // and denote the position of the output tile
 void multiplyBlock(const Matrix& A, const Matrix& B, Matrix& C,
@@ -69,9 +73,9 @@ void multiplyBlock(const Matrix& A, const Matrix& B, Matrix& C,
                    std::size_t colStart, std::size_t colEnd,
                    std::size_t blockSize) {
 
-    size_t numBlocksInner = A.cols / blockSize;
+    size_t numBlocksHorizontal = A.cols / blockSize;
     if (A.cols % blockSize != 0) {
-        numBlocksInner += 1;
+        numBlocksHorizontal += 1;
     }
 
     size_t ACols = A.cols; 
@@ -81,25 +85,113 @@ void multiplyBlock(const Matrix& A, const Matrix& B, Matrix& C,
     const double* BPtr = B.data.data();
     double* CPtr = C.data.data();
 
-    for (size_t b = 0; b < numBlocksInner; b++) {
+    for (size_t b = 0; b < numBlocksHorizontal; b++) {
         size_t kStart = b * blockSize;
         size_t kEnd = std::min(ACols, kStart + blockSize);
 
-        for (size_t i = rowStart; i < rowEnd; i++) {
+        for (size_t i = rowStart; i < rowEnd; i += regVBlockSize) {
             const double* AiPtr = APtr + i * ACols;
             double* CiPtr = CPtr + i * BCols;
-
-            for (size_t k = kStart; k < kEnd; k++) {
-                double Aik = AiPtr[k];
-                const double* BkPtr = BPtr + k * BCols;
+            
+            for (size_t j = colStart; j < colEnd; j += 8*regHBlockSize) {
                 
-                for (size_t j = colStart; j < colEnd; j++) {
-                    CiPtr[j] += Aik * BkPtr[j];
+                // load regVBlockSize * regHBlockSize block of C accumulators
+                __m512d accCArr[regVBlockSize * regHBlockSize];
+                #pragma GCC unroll 8
+                for (size_t rV = 0; rV < regVBlockSize; rV++) {
+
+                    #pragma GCC unroll 8
+                    for (size_t rH = 0; rH < regHBlockSize; rH++) {
+                        accCArr[rV*regHBlockSize + rH] = _mm512_loadu_pd(CiPtr + rV*BCols + j + rH*8);
+                    }
+                }
+
+                for (size_t k = kStart; k < kEnd; k++) {
+
+                    // load regVBlockSize A values at index k
+                    __m512d AVec[regVBlockSize];
+                    #pragma GCC unroll 8
+                    for (size_t rV = 0; rV < regVBlockSize; rV++) {
+                        AVec[rV] = _mm512_set1_pd((AiPtr + rV*ACols)[k]);
+                    }
+
+                    const double* BkPtr = BPtr + k * BCols;
+
+                    // FMA the block of C accumulators
+                    #pragma GCC unroll 8 
+                    for (size_t rH = 0; rH < regHBlockSize; rH++) {
+                        __m512d BVec = _mm512_loadu_pd(BkPtr + j + rH*8);
+                        
+                        #pragma GCC unroll 8
+                        for (size_t rV = 0; rV < regVBlockSize; rV++) {
+                            accCArr[rV*regHBlockSize + rH] = _mm512_fmadd_pd(AVec[rV], BVec, accCArr[rV*regHBlockSize + rH]);
+                        }
+                    }
+                }
+
+                // store C
+                #pragma GCC unroll 8
+                for (size_t rV = 0; rV < regVBlockSize; rV++) {
+
+                    #pragma GCC unroll 8
+                    for (size_t rH = 0; rH < regHBlockSize; rH++) {
+                        _mm512_storeu_pd(CiPtr + rV*BCols + j + rH*8, accCArr[rV*regHBlockSize + rH]);
+                    }
                 }
             }
-        }
+
+        } 
     }
 }
+
+// // rowStart, rowEnd, colStart, colEnd are inclusive 
+// // and denote the position of the output tile
+// void multiplyBlock(const Matrix& A, const Matrix& B, Matrix& C,
+//                    std::size_t rowStart, std::size_t rowEnd,
+//                    std::size_t colStart, std::size_t colEnd,
+//                    std::size_t blockSize) {
+
+//     size_t numBlocksInner = A.cols / blockSize;
+//     if (A.cols % blockSize != 0) {
+//         numBlocksInner += 1;
+//     }
+
+//     // size_t numRegBlocksVertical = (rowEnd - rowStart) / regVBlockSize;
+//     // if ((rowEnd - rowStart) % regVBlockSize != 0) {
+//     //     numRegBlocksVertical += 1;
+//     // }
+
+//     // size_t numRegBlocksHorizontal = (colEnd - colStart) / regHBlockSize;
+//     // if ((colEnd - colStart) % regHBlockSize != 0) {
+//     //     numRegBlocksHorizontal += 1;
+//     // }
+
+//     size_t ACols = A.cols; 
+//     size_t BCols = B.cols;
+
+//     const double* APtr = A.data.data();
+//     const double* BPtr = B.data.data();
+//     double* CPtr = C.data.data();
+
+//     for (size_t b = 0; b < numBlocksInner; b++) {
+//         size_t kStart = b * blockSize;
+//         size_t kEnd = std::min(ACols, kStart + blockSize);
+
+//         for (size_t i = rowStart; i < rowEnd; i++) {
+//             const double* AiPtr = APtr + i * ACols;
+//             double* CiPtr = CPtr + i * BCols;
+
+//             for (size_t k = kStart; k < kEnd; k++) {
+//                 double Aik = AiPtr[k];
+//                 const double* BkPtr = BPtr + k * BCols;
+                
+//                 for (size_t j = colStart; j < colEnd; j++) {
+//                     CiPtr[j] += Aik * BkPtr[j];
+//                 }
+//             }
+//         }
+//     }
+// }
 
 Matrix multiplyBlockedParallel(const Matrix& A, const Matrix& B, std::size_t blockSize, Threadpool& pool) {
     if (A.cols != B.rows) {
